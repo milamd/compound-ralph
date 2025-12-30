@@ -17,7 +17,7 @@ from .adapters.claude import ClaudeAdapter
 from .adapters.qchat import QChatAdapter
 from .adapters.gemini import GeminiAdapter
 from .adapters.acp import ACPAdapter
-from .metrics import Metrics, CostTracker
+from .metrics import Metrics, CostTracker, IterationStats, TriggerReason
 from .safety import SafetyGuard
 from .context import ContextManager
 from .output import RalphConsole
@@ -45,10 +45,12 @@ class RalphOrchestrator:
         archive_dir: str = "./prompts/archive",
         verbose: bool = False,
         acp_agent: str = None,
-        acp_permission_mode: str = None
+        acp_permission_mode: str = None,
+        iteration_telemetry: bool = True,
+        output_preview_length: int = 500
     ):
         """Initialize the orchestrator.
-        
+
         Args:
             prompt_file_or_config: Path to prompt file or RalphConfig object
             primary_tool: Primary AI tool to use (claude, qchat, gemini)
@@ -61,6 +63,8 @@ class RalphOrchestrator:
             verbose: Enable verbose logging output
             acp_agent: ACP agent command (e.g., claude-code-acp, gemini)
             acp_permission_mode: ACP permission handling mode
+            iteration_telemetry: Enable per-iteration telemetry capture
+            output_preview_length: Max chars for output preview in telemetry
         """
         # Store ACP-specific settings
         self.acp_agent = acp_agent
@@ -79,6 +83,8 @@ class RalphOrchestrator:
             self.checkpoint_interval = config.checkpoint_interval
             self.archive_dir = Path(config.archive_dir if hasattr(config, 'archive_dir') else archive_dir)
             self.verbose = config.verbose if hasattr(config, 'verbose') else False
+            self.iteration_telemetry = getattr(config, 'iteration_telemetry', True)
+            self.output_preview_length = getattr(config, 'output_preview_length', 500)
         else:
             # Individual parameters
             self.prompt_file = Path(prompt_file_or_config if prompt_file_or_config else "PROMPT.md")
@@ -91,9 +97,14 @@ class RalphOrchestrator:
             self.checkpoint_interval = checkpoint_interval
             self.archive_dir = Path(archive_dir)
             self.verbose = verbose
-        
+            self.iteration_telemetry = iteration_telemetry
+            self.output_preview_length = output_preview_length
+
         # Initialize components
         self.metrics = Metrics()
+        self.iteration_stats = IterationStats(
+            max_preview_length=self.output_preview_length
+        ) if self.iteration_telemetry else None
         self.cost_tracker = CostTracker() if track_costs else None
         self.safety_guard = SafetyGuard(max_iterations, max_runtime, max_cost)
         self.context_manager = ContextManager(self.prompt_file, prompt_text=self.prompt_text)
@@ -313,15 +324,25 @@ class RalphOrchestrator:
                 self.console.print_success("Task completion marker detected - stopping orchestration")
                 break
             
+            # Determine trigger reason BEFORE incrementing iteration
+            trigger_reason = self._determine_trigger_reason()
+
             # Execute iteration
             self.metrics.iterations += 1
             self.console.print_iteration_header(self.metrics.iterations)
             logger.info(f"Starting iteration {self.metrics.iterations}")
-            
+
+            # Record iteration timing
+            iteration_start = time.time()
+            iteration_success = False
+            iteration_error = ""
+            loop_detected = False
+
             try:
                 success = await self._aexecute_iteration()
 
                 if success:
+                    iteration_success = True
                     self.metrics.successful_iterations += 1
                     self.console.print_success(
                         f"Iteration {self.metrics.iterations} completed successfully"
@@ -333,13 +354,14 @@ class RalphOrchestrator:
 
                         # Check for loop (repeated similar outputs)
                         if self.safety_guard.detect_loop(self.last_response_output):
+                            loop_detected = True
                             self.console.print_warning(
                                 "Loop detected - agent producing repetitive outputs"
                             )
                             logger.warning("Breaking loop due to repetitive agent outputs")
-                            break
                 else:
                     self.metrics.failed_iterations += 1
+                    iteration_error = "Iteration failed"
                     self.console.print_warning(
                         f"Iteration {self.metrics.iterations} failed"
                     )
@@ -355,8 +377,45 @@ class RalphOrchestrator:
             except Exception as e:
                 logger.warning(f"Error in iteration: {e}")
                 self.metrics.errors += 1
+                iteration_error = str(e)
                 self.console.print_error(f"Error in iteration: {e}")
                 self._handle_error(e)
+
+            # Record per-iteration telemetry
+            iteration_duration = time.time() - iteration_start
+
+            # Extract cost/tokens from the latest usage if available
+            iteration_tokens = 0
+            iteration_cost = 0.0
+            if self.cost_tracker and self.cost_tracker.usage_history:
+                latest_usage = self.cost_tracker.usage_history[-1]
+                # Only use if this usage is from this iteration (recent timestamp)
+                if latest_usage.get("timestamp", 0) >= iteration_start:
+                    iteration_tokens = latest_usage.get("input_tokens", 0) + latest_usage.get("output_tokens", 0)
+                    iteration_cost = latest_usage.get("cost", 0.0)
+
+            # Record per-iteration telemetry if enabled
+            if self.iteration_stats:
+                # Get output preview (truncated to configured length)
+                output_preview = ""
+                if self.last_response_output:
+                    preview_len = self.output_preview_length
+                    output_preview = self.last_response_output[:preview_len] if len(self.last_response_output) > preview_len else self.last_response_output
+
+                self.iteration_stats.record_iteration(
+                    iteration=self.metrics.iterations,
+                    duration=iteration_duration,
+                    success=iteration_success,
+                    error=iteration_error,
+                    trigger_reason=trigger_reason,
+                    output_preview=output_preview,
+                    tokens_used=iteration_tokens,
+                    cost=iteration_cost,
+                )
+
+            # Break loop if detected (after recording telemetry)
+            if loop_detected:
+                break
             
             # Brief pause between iterations
             await asyncio.sleep(2)
@@ -540,6 +599,10 @@ class RalphOrchestrator:
         """Reset the orchestrator state."""
         logger.info("Resetting orchestrator state")
         self.metrics = Metrics()
+        if self.iteration_telemetry:
+            self.iteration_stats = IterationStats(
+                max_preview_length=self.output_preview_length
+            )
         if self.cost_tracker:
             self.cost_tracker = CostTracker()
         self.context_manager.reset()
@@ -574,24 +637,36 @@ class RalphOrchestrator:
             for tool, cost in self.cost_tracker.costs_by_tool.items():
                 self.console.print_info(f"  {tool}: ${cost:.4f}")
 
-        # Save metrics to file
+        # Save metrics to file with enhanced per-iteration telemetry
         metrics_dir = Path(".agent") / "metrics"
         metrics_dir.mkdir(parents=True, exist_ok=True)
         metrics_file = metrics_dir / f"metrics_{datetime.now().strftime('%Y%m%d_%H%M%S')}.json"
-        metrics_data = {
-            "iterations": self.metrics.iterations,
-            "successful": self.metrics.successful_iterations,
-            "failed": self.metrics.failed_iterations,
-            "errors": self.metrics.errors,
-            "checkpoints": self.metrics.checkpoints,
-            "rollbacks": self.metrics.rollbacks,
-        }
 
-        if self.cost_tracker:
-            metrics_data["cost"] = {
-                "total": self.cost_tracker.total_cost,
-                "by_tool": self.cost_tracker.costs_by_tool
+        # Build enhanced metrics data structure
+        metrics_data = {
+            # Summary section (backward compatible)
+            "summary": {
+                "iterations": self.metrics.iterations,
+                "successful": self.metrics.successful_iterations,
+                "failed": self.metrics.failed_iterations,
+                "errors": self.metrics.errors,
+                "checkpoints": self.metrics.checkpoints,
+                "rollbacks": self.metrics.rollbacks,
+            },
+            # Per-iteration details (if telemetry enabled)
+            "iterations": self.iteration_stats.iterations if self.iteration_stats else [],
+            # Cost tracking
+            "cost": {
+                "total": self.cost_tracker.total_cost if self.cost_tracker else 0,
+                "by_tool": self.cost_tracker.costs_by_tool if self.cost_tracker else {},
+                "history": self.cost_tracker.usage_history if self.cost_tracker else [],
+            },
+            # Analysis metrics (if telemetry enabled)
+            "analysis": {
+                "avg_iteration_duration": self.iteration_stats.get_average_duration() if self.iteration_stats else 0,
+                "success_rate": self.iteration_stats.get_success_rate() if self.iteration_stats else 0,
             }
+        }
 
         metrics_file.write_text(json.dumps(metrics_data, indent=2))
         self.console.print_success(f"Metrics saved to {metrics_file}")
@@ -674,6 +749,37 @@ class RalphOrchestrator:
         except Exception as e:
             logger.warning(f"Error checking completion marker: {e}")
             return False
+
+    def _determine_trigger_reason(self) -> str:
+        """Determine why this iteration is being triggered.
+
+        Analyzes the current orchestrator state to determine the reason
+        for triggering a new iteration. This is used for per-iteration
+        telemetry to understand orchestration patterns.
+
+        Returns:
+            str: The trigger reason value from TriggerReason enum.
+        """
+        # First iteration is always INITIAL
+        if self.metrics.iterations == 0:
+            return TriggerReason.INITIAL.value
+
+        # Check if we're in recovery mode (recent failures)
+        # Recovery if the last iteration failed and we've had multiple failures
+        if self.metrics.failed_iterations > 0:
+            # If failures are increasing relative to successes, we're recovering
+            recent_failure_rate = self.metrics.failed_iterations / max(1, self.metrics.iterations)
+            if recent_failure_rate > 0.5:
+                return TriggerReason.RECOVERY.value
+
+        # Check if previous iteration was successful
+        # The iteration counter has already been incremented by the time we check
+        # So we compare successful iterations to iterations - 1 (previous)
+        if self.metrics.successful_iterations == self.metrics.iterations - 1:
+            return TriggerReason.PREVIOUS_SUCCESS.value
+
+        # Default: task is incomplete and we're continuing
+        return TriggerReason.TASK_INCOMPLETE.value
 
     def _reload_prompt(self):
         """Reload the prompt file to pick up any changes."""

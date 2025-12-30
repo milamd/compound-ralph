@@ -5,9 +5,25 @@
 
 from dataclasses import dataclass, field
 from datetime import datetime
+from enum import Enum
 from typing import Dict, List, Any
 import time
 import json
+
+
+class TriggerReason(str, Enum):
+    """Reasons why an iteration was triggered.
+
+    Used for per-iteration telemetry to understand why the orchestrator
+    started each iteration, enabling analysis of orchestration patterns.
+    """
+    INITIAL = "initial"              # First iteration of a session
+    TASK_INCOMPLETE = "task_incomplete"  # Previous iteration didn't complete task
+    PREVIOUS_SUCCESS = "previous_success"  # Previous iteration succeeded, continuing
+    RECOVERY = "recovery"            # Recovering from a previous failure
+    LOOP_DETECTED = "loop_detected"  # Loop detection triggered intervention
+    SAFETY_LIMIT = "safety_limit"    # Safety limits triggered
+    USER_STOP = "user_stop"          # User requested stop
 
 
 @dataclass
@@ -154,6 +170,7 @@ class IterationStats:
     current_iteration: int = 0
     iterations: List[Dict[str, Any]] = field(default_factory=list)
     max_iterations_stored: int = 1000  # Memory limit for stored iterations
+    max_preview_length: int = 500  # Max chars for output preview truncation
 
     def __post_init__(self) -> None:
         """Initialize start time if not set."""
@@ -192,7 +209,12 @@ class IterationStats:
         iteration: int,
         duration: float,
         success: bool,
-        error: str
+        error: str,
+        trigger_reason: str = "",
+        output_preview: str = "",
+        tokens_used: int = 0,
+        cost: float = 0.0,
+        tools_used: List[str] | None = None,
     ) -> None:
         """Record iteration with full details.
 
@@ -201,6 +223,11 @@ class IterationStats:
             duration: Duration in seconds
             success: Whether iteration was successful
             error: Error message if any
+            trigger_reason: Why this iteration was triggered (from TriggerReason)
+            output_preview: Preview of iteration output (truncated for privacy)
+            tokens_used: Total tokens consumed in this iteration
+            cost: Cost in dollars for this iteration
+            tools_used: List of tools/MCPs invoked during iteration
         """
         # Update basic statistics
         self.total = max(self.total, iteration)
@@ -211,6 +238,10 @@ class IterationStats:
         else:
             self.failures += 1
 
+        # Truncate output preview for privacy (configurable length)
+        if output_preview and len(output_preview) > self.max_preview_length:
+            output_preview = output_preview[:self.max_preview_length] + "..."
+
         # Store detailed iteration information
         iteration_data = {
             "iteration": iteration,
@@ -218,6 +249,11 @@ class IterationStats:
             "success": success,
             "error": error,
             "timestamp": datetime.now().isoformat(),
+            "trigger_reason": trigger_reason,
+            "output_preview": output_preview,
+            "tokens_used": tokens_used,
+            "cost": cost,
+            "tools_used": tools_used or [],
         }
         self.iterations.append(iteration_data)
 
