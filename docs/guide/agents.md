@@ -412,9 +412,9 @@ python ralph_orchestrator.py \
 - **Simplicity**: Straightforward for basic tasks
 - **Concurrency**: Thread-safe operations for parallel processing
 - **Reliability**: Automatic error recovery and retry mechanisms
-- **Production-Ready**: Signal handling, graceful shutdown, resource cleanup
+- **Operational Reliability**: Signal handling, graceful shutdown, resource cleanup
 
-**Production Capabilities:**
+**Operational Capabilities:**
 ```bash
 # Quick iterations with Q
 python ralph_orchestrator.py \
