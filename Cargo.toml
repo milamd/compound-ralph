@@ -9,8 +9,7 @@ members = [
 ]
 
 [workspace.package]
-# NOTE: Spec specifies 2024 edition, using 2021 for rustc 1.87.0 compatibility
-edition = "2021"
+edition = "2024"
 version = "0.1.0"
 license = "MIT"
 repository = "https://github.com/hesreallyhim/ralph-orchestrator"
