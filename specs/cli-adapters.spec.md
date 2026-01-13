@@ -2,7 +2,7 @@
 status: review
 gap_analysis: 2026-01-13
 related:
-  - pty-mode.spec.md
+  - interactive-mode.spec.md
   - event-loop.spec.md
   - adapters/claude.spec.md
   - adapters/gemini.spec.md
@@ -136,10 +136,9 @@ cli:
   prompt_mode: "arg"             # "arg" or "stdin"
   prompt_flag: "--prompt"        # Flag prefix for arg mode (optional)
 
-  # Execution mode
-  pty_mode: false                # Enable PTY for TUI-rich agents
-  pty_interactive: true          # Forward user input in PTY mode
-  idle_timeout_secs: 30          # Kill after N seconds of no output
+  # Execution mode (see interactive-mode.spec.md)
+  default_mode: "autonomous"     # "autonomous" or "interactive"
+  idle_timeout_secs: 30          # Kill after N seconds idle (interactive mode only)
 
 # Per-adapter settings
 adapters:

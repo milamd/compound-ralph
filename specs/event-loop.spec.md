@@ -466,9 +466,11 @@ ralph run --config presets/research.yml -P my-question.md
 | `-v, --verbose` | Enable verbose output (shows stderr, debug logs) |
 | `--max-iterations <n>` | Override max iterations |
 | `--dry-run` | Show config without running |
-| `--pty` | Enable PTY mode for rich terminal UI |
-| `--observe` | PTY observation mode (no input forwarding) |
-| `--no-pty` | Disable PTY mode |
+| `-i, --interactive` | Enable interactive mode (PTY + user input) |
+| `-a, --autonomous` | Force autonomous mode (overrides config) |
+| `--idle-timeout <secs>` | Override idle timeout in interactive mode |
+
+See [interactive-mode.spec.md](interactive-mode.spec.md) for details on execution modes.
 
 ## CLI Backend
 

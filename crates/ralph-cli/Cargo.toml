@@ -38,3 +38,6 @@ scopeguard.workspace = true
 # For Unix process group and signal handling
 [target.'cfg(unix)'.dependencies]
 nix = { workspace = true }
+
+[dev-dependencies]
+tempfile.workspace = true

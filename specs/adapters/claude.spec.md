@@ -3,7 +3,7 @@ status: review
 gap_analysis: 2026-01-13
 related:
   - ../cli-adapters.spec.md
-  - ../pty-mode.spec.md
+  - ../interactive-mode.spec.md
 ---
 
 # Claude Adapter
