@@ -2,29 +2,6 @@
 
 > **Note:** When a known issue is fixed, remove it from this file. An empty file means no known issues.
 
-## Hat/Instructions Mismatch
-
-**Severity:** Critical
-
-**Symptom:** The iteration header displays the correct hat (e.g., `🎩 planner`) but the agent receives instructions for a different hat (e.g., builder instructions with "## BUILDER MODE").
-
-**Example:**
-```
-═══════════════════════════════════════════════════════════════════════════════
- ITERATION 2 │ 🎩 planner │ 4m 21s elapsed │ 2/100
-═══════════════════════════════════════════════════════════════════════════════
-```
-But agent output shows: "Since I'm in **Builder Mode**" and "❌ Create the scratchpad (planner does that)"
-
-**Location:** The bug is suspected to be in the prompt building flow:
-- `crates/ralph-cli/src/main.rs` - calls `event_loop.next_hat()` and `event_loop.build_prompt()`
-- `crates/ralph-core/src/event_loop.rs:225` - `build_prompt()` matches on `hat_id.as_str()`
-
-**Investigation Notes:**
-- The same `hat_id` is used for both display and prompt building
-- The match in `build_prompt()` should correctly route "planner" to `build_coordinator()` and "builder" to `build_ralph()`
-- Need to add debug logging to trace the actual `hat_id` value at each step
-
 ## Loop Thrashing (Consequence of Hat Mismatch)
 
 **Severity:** Critical
@@ -48,4 +25,6 @@ planner (wrong instructions) → build.blocked → triggers planner
 **Note:** The `max_consecutive_failures` safeguard doesn't catch this because the iterations "succeed" (CLI exits 0), they're just logically stuck.
 
 **Potential Fix:** Add detection for repeated `build.blocked` events from the same hat within N iterations.
+
+**Investigation Status:** Debug logging has been added to `crates/ralph-core/src/event_loop.rs` in the `build_prompt()` method to trace hat routing. This will help identify if the hat mismatch is actually occurring and where in the flow it happens.
 

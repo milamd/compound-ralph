@@ -23,6 +23,8 @@ pub enum TerminationReason {
     MaxCost,
     /// Too many consecutive failures.
     ConsecutiveFailures,
+    /// Loop thrashing detected (repeated blocked events).
+    LoopThrashing,
     /// Manually stopped.
     Stopped,
     /// Interrupted by signal (SIGINT/SIGTERM).
@@ -40,7 +42,9 @@ impl TerminationReason {
     pub fn exit_code(&self) -> i32 {
         match self {
             TerminationReason::CompletionPromise => 0,
-            TerminationReason::ConsecutiveFailures | TerminationReason::Stopped => 1,
+            TerminationReason::ConsecutiveFailures 
+            | TerminationReason::LoopThrashing 
+            | TerminationReason::Stopped => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
             | TerminationReason::MaxCost => 2,
@@ -59,6 +63,7 @@ impl TerminationReason {
             TerminationReason::MaxRuntime => "max_runtime",
             TerminationReason::MaxCost => "max_cost",
             TerminationReason::ConsecutiveFailures => "consecutive_failures",
+            TerminationReason::LoopThrashing => "loop_thrashing",
             TerminationReason::Stopped => "stopped",
             TerminationReason::Interrupted => "interrupted",
         }
@@ -80,6 +85,10 @@ pub struct LoopState {
     pub last_hat: Option<HatId>,
     /// Number of git checkpoints created.
     pub checkpoint_count: u32,
+    /// Consecutive blocked events from the same hat.
+    pub consecutive_blocked: u32,
+    /// Hat that emitted the last blocked event.
+    pub last_blocked_hat: Option<HatId>,
 }
 
 impl Default for LoopState {
@@ -91,6 +100,8 @@ impl Default for LoopState {
             started_at: Instant::now(),
             last_hat: None,
             checkpoint_count: 0,
+            consecutive_blocked: 0,
+            last_blocked_hat: None,
         }
     }
 }
@@ -174,6 +185,11 @@ impl EventLoop {
 
         if self.state.consecutive_failures >= cfg.max_consecutive_failures {
             return Some(TerminationReason::ConsecutiveFailures);
+        }
+
+        // Check for loop thrashing (3+ consecutive blocked events from same hat)
+        if self.state.consecutive_blocked >= 3 {
+            return Some(TerminationReason::LoopThrashing);
         }
 
         None
@@ -295,6 +311,28 @@ impl EventLoop {
         let parser = EventParser::new().with_source(hat_id.clone());
         let events = parser.parse(output);
 
+        // Track build.blocked events for thrashing detection
+        let has_blocked_event = events.iter().any(|e| e.topic == "build.blocked".into());
+        
+        if has_blocked_event {
+            // Check if same hat as last blocked event
+            if self.state.last_blocked_hat.as_ref() == Some(hat_id) {
+                self.state.consecutive_blocked += 1;
+            } else {
+                self.state.consecutive_blocked = 1;
+                self.state.last_blocked_hat = Some(hat_id.clone());
+            }
+            debug!(
+                hat = %hat_id.as_str(),
+                consecutive_blocked = self.state.consecutive_blocked,
+                "Detected build.blocked event"
+            );
+        } else {
+            // Reset counter on any non-blocked event
+            self.state.consecutive_blocked = 0;
+            self.state.last_blocked_hat = None;
+        }
+
         for event in events {
             debug!(
                 topic = %event.topic,
@@ -392,6 +430,7 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::MaxRuntime => "Stopped at runtime limit.",
         TerminationReason::MaxCost => "Stopped at cost limit.",
         TerminationReason::ConsecutiveFailures => "Too many consecutive failures.",
+        TerminationReason::LoopThrashing => "Loop thrashing detected - same hat repeatedly blocked.",
         TerminationReason::Stopped => "Manually stopped.",
         TerminationReason::Interrupted => "Interrupted by signal.",
     }
@@ -565,10 +604,74 @@ hats:
         // - 130: User interrupt (SIGINT = 128 + 2)
         assert_eq!(TerminationReason::CompletionPromise.exit_code(), 0);
         assert_eq!(TerminationReason::ConsecutiveFailures.exit_code(), 1);
+        assert_eq!(TerminationReason::LoopThrashing.exit_code(), 1);
         assert_eq!(TerminationReason::Stopped.exit_code(), 1);
         assert_eq!(TerminationReason::MaxIterations.exit_code(), 2);
         assert_eq!(TerminationReason::MaxRuntime.exit_code(), 2);
         assert_eq!(TerminationReason::MaxCost.exit_code(), 2);
         assert_eq!(TerminationReason::Interrupted.exit_code(), 130);
+    }
+
+    #[test]
+    fn test_loop_thrashing_detection() {
+        let config = RalphConfig::default();
+        let mut event_loop = EventLoop::new(config);
+        event_loop.initialize("Test");
+
+        let planner_id = HatId::new("planner");
+
+        // First blocked event - should not terminate
+        let reason = event_loop.process_output(&planner_id, "<event topic=\"build.blocked\">Stuck</event>", true);
+        assert_eq!(reason, None);
+        assert_eq!(event_loop.state.consecutive_blocked, 1);
+
+        // Second blocked event from same hat - should not terminate
+        let reason = event_loop.process_output(&planner_id, "<event topic=\"build.blocked\">Still stuck</event>", true);
+        assert_eq!(reason, None);
+        assert_eq!(event_loop.state.consecutive_blocked, 2);
+
+        // Third blocked event from same hat - should terminate with thrashing
+        let reason = event_loop.process_output(&planner_id, "<event topic=\"build.blocked\">Really stuck</event>", true);
+        assert_eq!(reason, Some(TerminationReason::LoopThrashing));
+        assert_eq!(event_loop.state.consecutive_blocked, 3);
+    }
+
+    #[test]
+    fn test_thrashing_counter_resets_on_different_hat() {
+        let config = RalphConfig::default();
+        let mut event_loop = EventLoop::new(config);
+        event_loop.initialize("Test");
+
+        let planner_id = HatId::new("planner");
+        let builder_id = HatId::new("builder");
+
+        // Planner blocked twice
+        event_loop.process_output(&planner_id, "<event topic=\"build.blocked\">Stuck</event>", true);
+        event_loop.process_output(&planner_id, "<event topic=\"build.blocked\">Still stuck</event>", true);
+        assert_eq!(event_loop.state.consecutive_blocked, 2);
+
+        // Builder blocked - should reset counter
+        event_loop.process_output(&builder_id, "<event topic=\"build.blocked\">Builder stuck</event>", true);
+        assert_eq!(event_loop.state.consecutive_blocked, 1);
+        assert_eq!(event_loop.state.last_blocked_hat, Some(builder_id));
+    }
+
+    #[test]
+    fn test_thrashing_counter_resets_on_non_blocked_event() {
+        let config = RalphConfig::default();
+        let mut event_loop = EventLoop::new(config);
+        event_loop.initialize("Test");
+
+        let planner_id = HatId::new("planner");
+
+        // Two blocked events
+        event_loop.process_output(&planner_id, "<event topic=\"build.blocked\">Stuck</event>", true);
+        event_loop.process_output(&planner_id, "<event topic=\"build.blocked\">Still stuck</event>", true);
+        assert_eq!(event_loop.state.consecutive_blocked, 2);
+
+        // Non-blocked event should reset counter
+        event_loop.process_output(&planner_id, "<event topic=\"build.task\">Working now</event>", true);
+        assert_eq!(event_loop.state.consecutive_blocked, 0);
+        assert_eq!(event_loop.state.last_blocked_hat, None);
     }
 }

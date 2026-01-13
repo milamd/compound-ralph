@@ -1037,6 +1037,7 @@ fn print_termination(reason: &TerminationReason, state: &ralph_core::LoopState, 
         TerminationReason::MaxRuntime => (YELLOW, "⚠", "Maximum runtime exceeded"),
         TerminationReason::MaxCost => (YELLOW, "⚠", "Maximum cost exceeded"),
         TerminationReason::ConsecutiveFailures => (RED, "✗", "Too many consecutive failures"),
+        TerminationReason::LoopThrashing => (RED, "🔄", "Loop thrashing detected"),
         TerminationReason::Stopped => (CYAN, "■", "Manually stopped"),
         TerminationReason::Interrupted => (YELLOW, "⚡", "Interrupted by signal"),
     };

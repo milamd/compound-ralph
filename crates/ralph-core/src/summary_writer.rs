@@ -128,6 +128,7 @@ impl SummaryWriter {
             TerminationReason::MaxRuntime => "Stopped: max runtime exceeded",
             TerminationReason::MaxCost => "Stopped: max cost exceeded",
             TerminationReason::ConsecutiveFailures => "Failed: too many consecutive failures",
+            TerminationReason::LoopThrashing => "Failed: loop thrashing detected",
             TerminationReason::Stopped => "Stopped manually",
             TerminationReason::Interrupted => "Interrupted by signal",
         }
@@ -221,6 +222,8 @@ mod tests {
             started_at: Instant::now(),
             last_hat: None,
             checkpoint_count: 2,
+            consecutive_blocked: 0,
+            last_blocked_hat: None,
         }
     }
 

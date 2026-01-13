@@ -440,6 +440,15 @@ Supports any headless CLI tool:
 
 Output streams to stdout in real-time while being accumulated for event parsing.
 
+### Output Visibility
+
+| Stream | Default Mode | Verbose Mode (`-v`) |
+|--------|--------------|---------------------|
+| **stdout** | Streamed to terminal | Streamed to terminal |
+| **stderr** | Hidden (accumulated only) | Streamed with `[stderr]` prefix |
+
+**Rationale:** CLI tools often write progress indicators, warnings, and debug info to stderr. Showing this by default creates noise that obscures the actual agent output. In verbose mode, stderr is valuable for debugging CLI tool issues.
+
 ## Event Syntax
 
 Agents publish events using XML-style tags:
@@ -674,6 +683,20 @@ The orchestrator owns all spawned CLI processes and must ensure no orphaned proc
 - **Given** loop terminates
 - **When** termination log is emitted
 - **Then** message includes iteration count and cost
+
+### Output Visibility
+
+- **Given** CLI backend writes to stderr
+- **When** running in default mode (no `-v` flag)
+- **Then** stderr output is NOT displayed to terminal
+
+- **Given** CLI backend writes to stderr
+- **When** running in verbose mode (`-v` flag)
+- **Then** stderr output is displayed with `[stderr]` prefix
+
+- **Given** CLI backend writes to stderr
+- **When** output is accumulated for event parsing
+- **Then** stderr content is included regardless of verbose mode
 
 ### Iteration Demarcation
 
