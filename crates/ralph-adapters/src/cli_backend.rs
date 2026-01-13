@@ -29,6 +29,7 @@ impl CliBackend {
     pub fn from_config(config: &CliConfig) -> Self {
         match config.backend.as_str() {
             "claude" => Self::claude(),
+            "kiro" => Self::kiro(),
             "gemini" => Self::gemini(),
             "codex" => Self::codex(),
             "amp" => Self::amp(),
@@ -44,6 +45,22 @@ impl CliBackend {
             args: vec!["--dangerously-skip-permissions".to_string()],
             prompt_mode: PromptMode::Arg,
             prompt_flag: Some("-p".to_string()),
+        }
+    }
+
+    /// Creates the Kiro backend.
+    ///
+    /// Uses kiro-cli in headless mode with all tools trusted.
+    pub fn kiro() -> Self {
+        Self {
+            command: "kiro-cli".to_string(),
+            args: vec![
+                "chat".to_string(),
+                "--no-interactive".to_string(),
+                "--trust-all-tools".to_string(),
+            ],
+            prompt_mode: PromptMode::Arg,
+            prompt_flag: None,
         }
     }
 
@@ -126,6 +143,19 @@ mod tests {
         assert_eq!(
             args,
             vec!["--dangerously-skip-permissions", "-p", "test prompt"]
+        );
+        assert!(stdin.is_none());
+    }
+
+    #[test]
+    fn test_kiro_backend() {
+        let backend = CliBackend::kiro();
+        let (cmd, args, stdin) = backend.build_command("test prompt");
+
+        assert_eq!(cmd, "kiro-cli");
+        assert_eq!(
+            args,
+            vec!["chat", "--no-interactive", "--trust-all-tools", "test prompt"]
         );
         assert!(stdin.is_none());
     }

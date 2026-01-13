@@ -42,7 +42,7 @@ pub struct RalphConfig {
     // ─────────────────────────────────────────────────────────────────────────
 
     /// V1 field: Backend CLI (maps to cli.backend).
-    /// Values: "claude", "gemini", "codex", "amp", "auto", or "custom".
+    /// Values: "claude", "kiro", "gemini", "codex", "amp", "auto", or "custom".
     #[serde(default)]
     pub agent: Option<String>,
 
@@ -399,7 +399,7 @@ impl RalphConfig {
     /// If empty, returns the default priority order.
     pub fn get_agent_priority(&self) -> Vec<&str> {
         if self.agent_priority.is_empty() {
-            vec!["claude", "gemini", "codex", "amp"]
+            vec!["claude", "kiro", "gemini", "codex", "amp"]
         } else {
             self.agent_priority.iter().map(|s| s.as_str()).collect()
         }
@@ -551,7 +551,7 @@ impl Default for CoreConfig {
 /// CLI backend configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliConfig {
-    /// Backend to use: "claude", "gemini", "codex", "amp", or "custom".
+    /// Backend to use: "claude", "kiro", "gemini", "codex", "amp", or "custom".
     #[serde(default = "default_backend")]
     pub backend: String,
 
@@ -737,7 +737,7 @@ agent_priority: [gemini, claude, codex]
     fn test_default_agent_priority() {
         let config = RalphConfig::default();
         let priority = config.get_agent_priority();
-        assert_eq!(priority, vec!["claude", "gemini", "codex", "amp"]);
+        assert_eq!(priority, vec!["claude", "kiro", "gemini", "codex", "amp"]);
     }
 
     #[test]

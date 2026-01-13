@@ -8,7 +8,7 @@ use std::sync::OnceLock;
 use tracing::debug;
 
 /// Default priority order for backend detection.
-pub const DEFAULT_PRIORITY: &[&str] = &["claude", "gemini", "codex", "amp"];
+pub const DEFAULT_PRIORITY: &[&str] = &["claude", "kiro", "gemini", "codex", "amp"];
 
 /// Cached detection result for session duration.
 static DETECTED_BACKEND: OnceLock<Option<String>> = OnceLock::new();
@@ -28,6 +28,7 @@ impl std::fmt::Display for NoBackendError {
         writeln!(f)?;
         writeln!(f, "Install one of the following:")?;
         writeln!(f, "  • Claude CLI: https://docs.anthropic.com/claude-code")?;
+        writeln!(f, "  • Kiro CLI:   https://kiro.dev")?;
         writeln!(f, "  • Gemini CLI: https://cloud.google.com/gemini")?;
         writeln!(f, "  • Codex CLI:  https://openai.com/codex")?;
         writeln!(f, "  • Amp CLI:    https://amp.dev")?;
