@@ -28,6 +28,10 @@ pub struct RalphConfig {
     #[serde(default)]
     pub cli: CliConfig,
 
+    /// Core paths and settings shared across all hats.
+    #[serde(default)]
+    pub core: CoreConfig,
+
     /// Hat definitions for multi-hat mode.
     #[serde(default)]
     pub hats: HashMap<String, HatConfig>,
@@ -129,6 +133,7 @@ impl Default for RalphConfig {
             mode: default_mode(),
             event_loop: EventLoopConfig::default(),
             cli: CliConfig::default(),
+            core: CoreConfig::default(),
             hats: HashMap::new(),
             // V1 compatibility fields
             agent: None,
@@ -364,6 +369,24 @@ impl RalphConfig {
             });
         }
 
+        // Check for ambiguous routing: each trigger topic must map to exactly one hat
+        // Per spec: "Every trigger maps to exactly one hat | No ambiguous routing"
+        if !self.hats.is_empty() {
+            let mut trigger_to_hat: HashMap<&str, &str> = HashMap::new();
+            for (hat_id, hat_config) in &self.hats {
+                for trigger in &hat_config.triggers {
+                    if let Some(existing_hat) = trigger_to_hat.get(trigger.as_str()) {
+                        return Err(ConfigError::AmbiguousRouting {
+                            trigger: trigger.clone(),
+                            hat1: existing_hat.to_string(),
+                            hat2: hat_id.clone(),
+                        });
+                    }
+                    trigger_to_hat.insert(trigger.as_str(), hat_id.as_str());
+                }
+            }
+        }
+
         Ok(warnings)
     }
 
@@ -494,6 +517,37 @@ impl Default for EventLoopConfig {
     }
 }
 
+/// Core paths and settings shared across all hats.
+///
+/// Per spec: "Core behaviors (always injected, can customize paths)"
+#[derive(Debug, Clone, Serialize, Deserialize)]
+pub struct CoreConfig {
+    /// Path to the scratchpad file (shared state between hats).
+    #[serde(default = "default_scratchpad")]
+    pub scratchpad: String,
+
+    /// Path to the specs directory (source of truth for requirements).
+    #[serde(default = "default_specs_dir")]
+    pub specs_dir: String,
+}
+
+fn default_scratchpad() -> String {
+    ".agent/scratchpad.md".to_string()
+}
+
+fn default_specs_dir() -> String {
+    "./specs/".to_string()
+}
+
+impl Default for CoreConfig {
+    fn default() -> Self {
+        Self {
+            scratchpad: default_scratchpad(),
+            specs_dir: default_specs_dir(),
+        }
+    }
+}
+
 /// CLI backend configuration.
 #[derive(Debug, Clone, Serialize, Deserialize)]
 pub struct CliConfig {
@@ -533,9 +587,10 @@ pub struct HatConfig {
     /// Human-readable name for the hat.
     pub name: String,
 
-    /// Topic patterns this hat subscribes to.
-    #[serde(default)]
-    pub subscriptions: Vec<String>,
+    /// Events that trigger this hat to be worn.
+    /// Per spec: "Hats define triggers — which events cause Ralph to wear this hat."
+    #[serde(default, alias = "subscriptions")]
+    pub triggers: Vec<String>,
 
     /// Topics this hat publishes.
     #[serde(default)]
@@ -547,9 +602,9 @@ pub struct HatConfig {
 }
 
 impl HatConfig {
-    /// Converts subscription strings to Topic objects.
-    pub fn subscription_topics(&self) -> Vec<Topic> {
-        self.subscriptions.iter().map(|s| Topic::new(s)).collect()
+    /// Converts trigger strings to Topic objects.
+    pub fn trigger_topics(&self) -> Vec<Topic> {
+        self.triggers.iter().map(|s| Topic::new(s)).collect()
     }
 
     /// Converts publish strings to Topic objects.
@@ -566,6 +621,13 @@ pub enum ConfigError {
 
     #[error("YAML parse error: {0}")]
     Yaml(#[from] serde_yaml::Error),
+
+    #[error("Ambiguous routing: trigger '{trigger}' is claimed by both '{hat1}' and '{hat2}'")]
+    AmbiguousRouting {
+        trigger: String,
+        hat1: String,
+        hat2: String,
+    },
 }
 
 #[cfg(test)]
@@ -595,7 +657,7 @@ cli:
 hats:
   implementer:
     name: "Implementer"
-    subscriptions: ["task.*", "review.done"]
+    triggers: ["task.*", "review.done"]
     publishes: ["impl.done"]
     instructions: "You are the implementation agent."
 "#;
@@ -606,7 +668,23 @@ hats:
         assert_eq!(config.hats.len(), 1);
 
         let hat = config.hats.get("implementer").unwrap();
-        assert_eq!(hat.subscriptions.len(), 2);
+        assert_eq!(hat.triggers.len(), 2);
+    }
+
+    #[test]
+    fn test_triggers_alias_for_subscriptions() {
+        // Backwards compatibility: "subscriptions" is an alias for "triggers"
+        let yaml = r#"
+mode: "multi"
+hats:
+  builder:
+    name: "Builder"
+    subscriptions: ["build.task"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let hat = config.hats.get("builder").unwrap();
+        assert_eq!(hat.triggers.len(), 1);
+        assert_eq!(hat.triggers[0], "build.task");
     }
 
     #[test]
@@ -764,5 +842,68 @@ future_feature: true
         let result: Result<RalphConfig, _> = serde_yaml::from_str(yaml);
         // Should parse successfully, ignoring unknown fields
         assert!(result.is_ok());
+    }
+
+    #[test]
+    fn test_ambiguous_routing_rejected() {
+        // Per spec: "Every trigger maps to exactly one hat | No ambiguous routing"
+        let yaml = r#"
+mode: "multi"
+hats:
+  planner:
+    name: "Planner"
+    triggers: ["task.start", "build.done"]
+  builder:
+    name: "Builder"
+    triggers: ["build.task", "build.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(result.is_err());
+        let err = result.unwrap_err();
+        assert!(
+            matches!(&err, ConfigError::AmbiguousRouting { trigger, .. } if trigger == "build.done"),
+            "Expected AmbiguousRouting error for 'build.done', got: {:?}",
+            err
+        );
+    }
+
+    #[test]
+    fn test_unique_triggers_accepted() {
+        // Valid config: each trigger maps to exactly one hat
+        let yaml = r#"
+mode: "multi"
+hats:
+  planner:
+    name: "Planner"
+    triggers: ["task.start", "build.done", "build.blocked"]
+  builder:
+    name: "Builder"
+    triggers: ["build.task"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let result = config.validate();
+
+        assert!(result.is_ok(), "Expected valid config, got: {:?}", result.unwrap_err());
+    }
+
+    #[test]
+    fn test_core_config_defaults() {
+        let config = RalphConfig::default();
+        assert_eq!(config.core.scratchpad, ".agent/scratchpad.md");
+        assert_eq!(config.core.specs_dir, "./specs/");
+    }
+
+    #[test]
+    fn test_core_config_customizable() {
+        let yaml = r#"
+core:
+  scratchpad: ".workspace/plan.md"
+  specs_dir: "./specifications/"
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        assert_eq!(config.core.scratchpad, ".workspace/plan.md");
+        assert_eq!(config.core.specs_dir, "./specifications/");
     }
 }

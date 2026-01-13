@@ -37,7 +37,7 @@ impl HatRegistry {
     /// Creates a Hat from HatConfig.
     fn hat_from_config(id: &str, config: &HatConfig) -> Hat {
         let mut hat = Hat::new(id, &config.name);
-        hat.subscriptions = config.subscription_topics();
+        hat.subscriptions = config.trigger_topics();
         hat.publishes = config.publish_topics();
         hat.instructions = config.instructions.clone();
         hat
@@ -113,10 +113,10 @@ mode: "multi"
 hats:
   implementer:
     name: "Implementer"
-    subscriptions: ["task.*"]
+    triggers: ["task.*"]
   reviewer:
     name: "Reviewer"
-    subscriptions: ["impl.*"]
+    triggers: ["impl.*"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = HatRegistry::from_config(&config);
@@ -138,10 +138,10 @@ mode: "multi"
 hats:
   impl:
     name: "Implementer"
-    subscriptions: ["task.*", "review.done"]
+    triggers: ["task.*", "review.done"]
   reviewer:
     name: "Reviewer"
-    subscriptions: ["impl.*"]
+    triggers: ["impl.*"]
 "#;
         let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
         let registry = HatRegistry::from_config(&config);
