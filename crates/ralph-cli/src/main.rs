@@ -8,13 +8,46 @@
 //! - Entry point to the headless orchestration loop
 
 use anyhow::{Context, Result};
-use clap::Parser;
+use clap::{Parser, ValueEnum};
 use ralph_adapters::{detect_backend, CliBackend, CliExecutor};
 use ralph_core::{EventLoop, RalphConfig, TerminationReason};
-use std::io::stdout;
+use std::io::{stdout, IsTerminal};
 use std::path::PathBuf;
 use std::process::Command;
 use tracing::{error, info, warn};
+
+/// Color output mode for terminal display.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, ValueEnum)]
+pub enum ColorMode {
+    /// Automatically detect if stdout is a TTY
+    #[default]
+    Auto,
+    /// Always use colors
+    Always,
+    /// Never use colors
+    Never,
+}
+
+impl ColorMode {
+    /// Returns true if colors should be used based on mode and terminal detection.
+    fn should_use_colors(self) -> bool {
+        match self {
+            ColorMode::Always => true,
+            ColorMode::Never => false,
+            ColorMode::Auto => stdout().is_terminal(),
+        }
+    }
+}
+
+/// ANSI color codes for terminal output.
+mod colors {
+    pub const RESET: &str = "\x1b[0m";
+    pub const BOLD: &str = "\x1b[1m";
+    pub const GREEN: &str = "\x1b[32m";
+    pub const YELLOW: &str = "\x1b[33m";
+    pub const RED: &str = "\x1b[31m";
+    pub const CYAN: &str = "\x1b[36m";
+}
 
 /// Ralph Orchestrator - Multi-agent orchestration framework
 #[derive(Parser, Debug)]
@@ -43,6 +76,10 @@ struct Args {
     /// Verbose output
     #[arg(short, long)]
     verbose: bool,
+
+    /// Color output mode (auto, always, never)
+    #[arg(long, value_enum, default_value_t = ColorMode::Auto)]
+    color: ColorMode,
 }
 
 #[tokio::main]
@@ -125,10 +162,12 @@ async fn main() -> Result<()> {
     }
 
     // Run the orchestration loop
-    run_loop(config).await
+    run_loop(config, args.color).await
 }
 
-async fn run_loop(config: RalphConfig) -> Result<()> {
+async fn run_loop(config: RalphConfig, color_mode: ColorMode) -> Result<()> {
+    let use_colors = color_mode.should_use_colors();
+
     // Read prompt file
     let prompt_content = std::fs::read_to_string(&config.event_loop.prompt_file)
         .with_context(|| format!("Failed to read prompt file: {}", config.event_loop.prompt_file))?;
@@ -151,7 +190,7 @@ async fn run_loop(config: RalphConfig) -> Result<()> {
     loop {
         // Check termination before execution
         if let Some(reason) = event_loop.check_termination() {
-            print_termination(&reason, event_loop.state());
+            print_termination(&reason, event_loop.state(), use_colors);
             break;
         }
 
@@ -185,7 +224,7 @@ async fn run_loop(config: RalphConfig) -> Result<()> {
 
         // Process output
         if let Some(reason) = event_loop.process_output(&hat_id, &result.output, result.success) {
-            print_termination(&reason, event_loop.state());
+            print_termination(&reason, event_loop.state(), use_colors);
             break;
         }
 
@@ -198,24 +237,50 @@ async fn run_loop(config: RalphConfig) -> Result<()> {
     Ok(())
 }
 
-fn print_termination(reason: &TerminationReason, state: &ralph_core::LoopState) {
-    let msg = match reason {
-        TerminationReason::CompletionPromise => "✓ Completion promise detected",
-        TerminationReason::MaxIterations => "⚠ Maximum iterations reached",
-        TerminationReason::MaxRuntime => "⚠ Maximum runtime exceeded",
-        TerminationReason::MaxCost => "⚠ Maximum cost exceeded",
-        TerminationReason::ConsecutiveFailures => "✗ Too many consecutive failures",
-        TerminationReason::Stopped => "■ Manually stopped",
+fn print_termination(reason: &TerminationReason, state: &ralph_core::LoopState, use_colors: bool) {
+    use colors::*;
+
+    // Determine status color and message based on termination reason
+    let (color, icon, label) = match reason {
+        TerminationReason::CompletionPromise => (GREEN, "✓", "Completion promise detected"),
+        TerminationReason::MaxIterations => (YELLOW, "⚠", "Maximum iterations reached"),
+        TerminationReason::MaxRuntime => (YELLOW, "⚠", "Maximum runtime exceeded"),
+        TerminationReason::MaxCost => (YELLOW, "⚠", "Maximum cost exceeded"),
+        TerminationReason::ConsecutiveFailures => (RED, "✗", "Too many consecutive failures"),
+        TerminationReason::Stopped => (CYAN, "■", "Manually stopped"),
     };
 
-    println!("\n{}", "=".repeat(60));
-    println!("Loop terminated: {msg}");
-    println!("  Iterations: {}", state.iteration);
-    println!("  Elapsed: {:.1}s", state.elapsed().as_secs_f64());
-    if state.cumulative_cost > 0.0 {
-        println!("  Cost: ${:.2}", state.cumulative_cost);
+    let separator = "─".repeat(58);
+
+    if use_colors {
+        println!("\n{BOLD}┌{separator}┐{RESET}");
+        println!(
+            "{BOLD}│{RESET} {color}{BOLD}{icon}{RESET} Loop terminated: {color}{label}{RESET}"
+        );
+        println!("{BOLD}├{separator}┤{RESET}");
+        println!("{BOLD}│{RESET}   Iterations: {CYAN}{}{RESET}", state.iteration);
+        println!(
+            "{BOLD}│{RESET}   Elapsed:    {CYAN}{:.1}s{RESET}",
+            state.elapsed().as_secs_f64()
+        );
+        if state.cumulative_cost > 0.0 {
+            println!(
+                "{BOLD}│{RESET}   Cost:       {CYAN}${:.2}{RESET}",
+                state.cumulative_cost
+            );
+        }
+        println!("{BOLD}└{separator}┘{RESET}");
+    } else {
+        println!("\n+{}+", "-".repeat(58));
+        println!("| {icon} Loop terminated: {label}");
+        println!("+{}+", "-".repeat(58));
+        println!("|   Iterations: {}", state.iteration);
+        println!("|   Elapsed:    {:.1}s", state.elapsed().as_secs_f64());
+        if state.cumulative_cost > 0.0 {
+            println!("|   Cost:       ${:.2}", state.cumulative_cost);
+        }
+        println!("+{}+", "-".repeat(58));
     }
-    println!("{}", "=".repeat(60));
 }
 
 fn create_checkpoint(iteration: u32) -> Result<()> {
