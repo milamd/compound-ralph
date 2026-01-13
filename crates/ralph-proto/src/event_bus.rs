@@ -1,24 +1,58 @@
 //! Event bus for pub/sub messaging.
 //!
 //! The event bus routes events to subscribed hats based on topic patterns.
+//! An optional observer can be set to receive all published events for
+//! recording and benchmarking purposes.
 
 use crate::{Event, Hat, HatId};
 use std::collections::HashMap;
 
+/// Type alias for the observer callback function.
+type Observer = Box<dyn Fn(&Event) + Send + 'static>;
+
 /// Central pub/sub hub for routing events between hats.
-#[derive(Debug, Default)]
 pub struct EventBus {
     /// Registered hats indexed by ID.
     hats: HashMap<HatId, Hat>,
 
     /// Pending events for each hat.
     pending: HashMap<HatId, Vec<Event>>,
+
+    /// Optional observer that receives all published events.
+    observer: Option<Observer>,
+}
+
+impl Default for EventBus {
+    fn default() -> Self {
+        Self {
+            hats: HashMap::new(),
+            pending: HashMap::new(),
+            observer: None,
+        }
+    }
 }
 
 impl EventBus {
     /// Creates a new empty event bus.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Sets an observer that receives all published events.
+    ///
+    /// This enables recording sessions by subscribing to the event stream
+    /// without modifying the routing logic. The observer is called before
+    /// events are routed to subscribers.
+    pub fn set_observer<F>(&mut self, observer: F)
+    where
+        F: Fn(&Event) + Send + 'static,
+    {
+        self.observer = Some(Box::new(observer));
+    }
+
+    /// Clears the observer callback.
+    pub fn clear_observer(&mut self) {
+        self.observer = None;
     }
 
     /// Registers a hat with the event bus.
@@ -31,7 +65,13 @@ impl EventBus {
     /// Publishes an event to all subscribed hats.
     ///
     /// Returns the list of hat IDs that received the event.
+    /// If an observer is set, it receives the event before routing.
     pub fn publish(&mut self, event: Event) -> Vec<HatId> {
+        // Notify observer before routing
+        if let Some(ref observer) = self.observer {
+            observer(&event);
+        }
+
         let mut recipients = Vec::new();
 
         // If there's a direct target, route only to that hat
@@ -171,5 +211,55 @@ mod tests {
 
         // Event should not route back to source
         assert!(recipients.is_empty());
+    }
+
+    #[test]
+    fn test_observer_receives_all_events() {
+        use std::sync::{Arc, Mutex};
+
+        let mut bus = EventBus::new();
+        let observed: Arc<Mutex<Vec<String>>> = Arc::new(Mutex::new(Vec::new()));
+
+        let observed_clone = Arc::clone(&observed);
+        bus.set_observer(move |event| {
+            observed_clone
+                .lock()
+                .unwrap()
+                .push(event.payload.clone());
+        });
+
+        let hat = Hat::new("impl", "Implementer").subscribe("task.*");
+        bus.register(hat);
+
+        // Publish events - observer should see all regardless of routing
+        bus.publish(Event::new("task.start", "Start"));
+        bus.publish(Event::new("other.event", "Other")); // No subscriber
+        bus.publish(Event::new("task.done", "Done"));
+
+        let captured = observed.lock().unwrap();
+        assert_eq!(captured.len(), 3);
+        assert_eq!(captured[0], "Start");
+        assert_eq!(captured[1], "Other");
+        assert_eq!(captured[2], "Done");
+    }
+
+    #[test]
+    fn test_clear_observer() {
+        use std::sync::{Arc, Mutex};
+
+        let mut bus = EventBus::new();
+        let count = Arc::new(Mutex::new(0));
+
+        let count_clone = Arc::clone(&count);
+        bus.set_observer(move |_| {
+            *count_clone.lock().unwrap() += 1;
+        });
+
+        bus.publish(Event::new("test", "1"));
+        assert_eq!(*count.lock().unwrap(), 1);
+
+        bus.clear_observer();
+        bus.publish(Event::new("test", "2"));
+        assert_eq!(*count.lock().unwrap(), 1); // Still 1, observer cleared
     }
 }
