@@ -5,6 +5,7 @@
 
 use std::process::Command;
 use std::sync::OnceLock;
+use tracing::debug;
 
 /// Default priority order for backend detection.
 pub const DEFAULT_PRIORITY: &[&str] = &["claude", "gemini", "codex", "amp"];
@@ -44,8 +45,15 @@ pub fn is_backend_available(backend: &str) -> bool {
     let result = Command::new(backend).arg("--version").output();
 
     match result {
-        Ok(output) => output.status.success(),
-        Err(_) => false,
+        Ok(output) => {
+            let available = output.status.success();
+            debug!(backend = backend, available = available, "Backend availability check");
+            available
+        }
+        Err(_) => {
+            debug!(backend = backend, available = false, "Backend not found in PATH");
+            false
+        }
     }
 }
 
@@ -62,9 +70,12 @@ pub fn detect_backend<F>(priority: &[&str], adapter_enabled: F) -> Result<String
 where
     F: Fn(&str) -> bool,
 {
+    debug!(priority = ?priority, "Starting backend auto-detection");
+
     // Check cache first
     if let Some(cached) = DETECTED_BACKEND.get() {
         if let Some(backend) = cached {
+            debug!(backend = %backend, "Using cached backend detection result");
             return Ok(backend.clone());
         }
     }
@@ -74,18 +85,21 @@ where
     for &backend in priority {
         // Skip if adapter is disabled in config
         if !adapter_enabled(backend) {
+            debug!(backend = backend, "Skipping disabled adapter");
             continue;
         }
 
         checked.push(backend.to_string());
 
         if is_backend_available(backend) {
+            debug!(backend = backend, "Backend detected and selected");
             // Cache the result (ignore if already set)
             let _ = DETECTED_BACKEND.set(Some(backend.to_string()));
             return Ok(backend.to_string());
         }
     }
 
+    debug!(checked = ?checked, "No backends available");
     // Cache the failure too
     let _ = DETECTED_BACKEND.set(None);
 

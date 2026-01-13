@@ -7,6 +7,7 @@ use ralph_proto::Topic;
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::path::Path;
+use tracing::debug;
 
 /// Top-level configuration for Ralph Orchestrator.
 ///
@@ -206,8 +207,16 @@ impl Default for AdapterSettings {
 impl RalphConfig {
     /// Loads configuration from a YAML file.
     pub fn from_file(path: impl AsRef<Path>) -> Result<Self, ConfigError> {
-        let content = std::fs::read_to_string(path)?;
+        let path_ref = path.as_ref();
+        debug!(path = %path_ref.display(), "Loading configuration from file");
+        let content = std::fs::read_to_string(path_ref)?;
         let config: Self = serde_yaml::from_str(&content)?;
+        debug!(
+            mode = %config.mode,
+            backend = %config.cli.backend,
+            has_v1_fields = config.agent.is_some(),
+            "Configuration loaded"
+        );
         Ok(config)
     }
 
@@ -221,39 +230,59 @@ impl RalphConfig {
     /// V1 flat fields take precedence over v2 nested fields when both are present.
     /// This allows users to use either format or mix them.
     pub fn normalize(&mut self) {
+        let mut normalized_count = 0;
+
         // Map v1 `agent` to v2 `cli.backend`
         if let Some(ref agent) = self.agent {
+            debug!(from = "agent", to = "cli.backend", value = %agent, "Normalizing v1 field");
             self.cli.backend = agent.clone();
+            normalized_count += 1;
         }
 
         // Map v1 `prompt_file` to v2 `event_loop.prompt_file`
         if let Some(ref pf) = self.prompt_file {
+            debug!(from = "prompt_file", to = "event_loop.prompt_file", value = %pf, "Normalizing v1 field");
             self.event_loop.prompt_file = pf.clone();
+            normalized_count += 1;
         }
 
         // Map v1 `completion_promise` to v2 `event_loop.completion_promise`
         if let Some(ref cp) = self.completion_promise {
+            debug!(from = "completion_promise", to = "event_loop.completion_promise", "Normalizing v1 field");
             self.event_loop.completion_promise = cp.clone();
+            normalized_count += 1;
         }
 
         // Map v1 `max_iterations` to v2 `event_loop.max_iterations`
         if let Some(mi) = self.max_iterations {
+            debug!(from = "max_iterations", to = "event_loop.max_iterations", value = mi, "Normalizing v1 field");
             self.event_loop.max_iterations = mi;
+            normalized_count += 1;
         }
 
         // Map v1 `max_runtime` to v2 `event_loop.max_runtime_seconds`
         if let Some(mr) = self.max_runtime {
+            debug!(from = "max_runtime", to = "event_loop.max_runtime_seconds", value = mr, "Normalizing v1 field");
             self.event_loop.max_runtime_seconds = mr;
+            normalized_count += 1;
         }
 
         // Map v1 `max_cost` to v2 `event_loop.max_cost_usd`
         if self.max_cost.is_some() {
+            debug!(from = "max_cost", to = "event_loop.max_cost_usd", "Normalizing v1 field");
             self.event_loop.max_cost_usd = self.max_cost;
+            normalized_count += 1;
         }
 
         // Map v1 `checkpoint_interval` to v2 `event_loop.checkpoint_interval`
         if let Some(ci) = self.checkpoint_interval {
+            debug!(from = "checkpoint_interval", to = "event_loop.checkpoint_interval", value = ci, "Normalizing v1 field");
             self.event_loop.checkpoint_interval = ci;
+            normalized_count += 1;
+        }
+
+        if normalized_count > 0 {
+            debug!(fields_normalized = normalized_count, "V1 to V2 config normalization complete");
         }
     }
 
