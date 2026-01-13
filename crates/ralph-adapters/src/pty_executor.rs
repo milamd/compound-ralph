@@ -9,6 +9,11 @@
 //! - Idle timeout with activity tracking (output AND input reset timer)
 //! - Double Ctrl+C handling (first forwards, second terminates)
 //! - Raw mode management with cleanup on exit/crash
+//!
+//! Architecture:
+//! - Uses `tokio::select!` for non-blocking I/O multiplexing
+//! - Spawns separate tasks for PTY output and user input
+//! - Enables responsive Ctrl+C handling even when PTY is idle
 
 // Exit codes and PIDs are always within i32 range in practice
 #![allow(clippy::cast_possible_wrap)]
@@ -321,28 +326,32 @@ impl PtyExecutor {
 
     /// Runs in interactive mode (bidirectional I/O).
     ///
-    /// User input is forwarded to Claude (except reserved keys).
-    /// Returns when the process exits, idle timeout triggers, or user interrupts.
+    /// Uses `tokio::select!` for non-blocking I/O multiplexing between:
+    /// 1. PTY output (from blocking reader via channel)
+    /// 2. User input (from stdin thread via channel)
+    /// 3. Idle timeout
+    ///
+    /// This design ensures Ctrl+C is always responsive, even when the PTY
+    /// has no output (e.g., during long-running tool calls).
     ///
     /// # Errors
     ///
     /// Returns an error if PTY allocation fails, the command cannot be spawned,
     /// or an I/O error occurs during bidirectional communication.
     #[allow(clippy::too_many_lines)] // Complex state machine requires cohesive implementation
-    pub fn run_interactive(&self, prompt: &str) -> io::Result<PtyExecutionResult> {
+    pub async fn run_interactive(&self, prompt: &str) -> io::Result<PtyExecutionResult> {
         let (pair, mut child) = self.spawn_pty(prompt)?;
 
-        let mut reader = pair.master.try_clone_reader()
+        let reader = pair.master.try_clone_reader()
             .map_err(|e| io::Error::other(e.to_string()))?;
         let mut writer = pair.master.take_writer()
             .map_err(|e| io::Error::other(e.to_string()))?;
 
-        // Drop the slave
+        // Drop the slave to signal EOF when master closes
         drop(pair.slave);
 
         let mut output = Vec::new();
-        let mut last_activity = Instant::now();
-        let timeout = if self.config.idle_timeout_secs > 0 {
+        let timeout_duration = if self.config.idle_timeout_secs > 0 {
             Some(Duration::from_secs(u64::from(self.config.idle_timeout_secs)))
         } else {
             None
@@ -351,21 +360,58 @@ impl PtyExecutor {
         let mut ctrl_c_state = CtrlCState::new();
         let mut termination = TerminationType::Natural;
 
-        // Flag for termination request
+        // Flag for termination request (shared with spawned tasks)
         let should_terminate = Arc::new(AtomicBool::new(false));
-        let force_kill = Arc::new(AtomicBool::new(false));
 
-        // Spawn input handling thread
-        let should_terminate_clone = Arc::clone(&should_terminate);
-        let force_kill_clone = Arc::clone(&force_kill);
+        // Spawn output reading task (blocking read wrapped in spawn_blocking via channel)
+        let (output_tx, mut output_rx) = mpsc::channel::<OutputEvent>(256);
+        let should_terminate_output = Arc::clone(&should_terminate);
+
+        std::thread::spawn(move || {
+            let mut reader = reader;
+            let mut buf = [0u8; 4096];
+
+            loop {
+                if should_terminate_output.load(Ordering::SeqCst) {
+                    break;
+                }
+
+                match reader.read(&mut buf) {
+                    Ok(0) => {
+                        // EOF - PTY closed
+                        let _ = output_tx.blocking_send(OutputEvent::Eof);
+                        break;
+                    }
+                    Ok(n) => {
+                        if output_tx.blocking_send(OutputEvent::Data(buf[..n].to_vec())).is_err() {
+                            break;
+                        }
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
+                        // Non-blocking mode: no data available, yield briefly
+                        std::thread::sleep(Duration::from_millis(1));
+                    }
+                    Err(e) if e.kind() == io::ErrorKind::Interrupted => {
+                        // Interrupted by signal, retry
+                    }
+                    Err(e) => {
+                        let _ = output_tx.blocking_send(OutputEvent::Error(e.to_string()));
+                        break;
+                    }
+                }
+            }
+        });
+
+        // Spawn input reading task
         let (input_tx, mut input_rx) = mpsc::unbounded_channel::<InputEvent>();
+        let should_terminate_input = Arc::clone(&should_terminate);
 
         std::thread::spawn(move || {
             let mut stdin = io::stdin();
             let mut buf = [0u8; 1];
 
             loop {
-                if should_terminate_clone.load(Ordering::SeqCst) {
+                if should_terminate_input.load(Ordering::SeqCst) {
                     break;
                 }
 
@@ -374,8 +420,8 @@ impl PtyExecutor {
                     Ok(1) => {
                         let byte = buf[0];
                         let event = match byte {
-                            3 => InputEvent::CtrlC,      // Ctrl+C
-                            28 => InputEvent::CtrlBackslash, // Ctrl+\
+                            3 => InputEvent::CtrlC,           // Ctrl+C
+                            28 => InputEvent::CtrlBackslash,  // Ctrl+\
                             _ => InputEvent::Data(vec![byte]),
                         };
                         if input_tx.send(event).is_err() {
@@ -389,27 +435,21 @@ impl PtyExecutor {
             }
         });
 
-        // Main loop
-        let mut buf = [0u8; 4096];
-
+        // Main select loop - this is the key fix for blocking I/O
+        // We use tokio::select! to multiplex between output, input, and timeout
         loop {
-            // Check if child has exited
+            // Check if child has exited (non-blocking check before select)
             if let Some(status) = child.try_wait()
                 .map_err(|e| io::Error::other(e.to_string()))?
             {
                 debug!(exit_status = ?status, "Child process exited");
 
-                // Drain remaining output
-                loop {
-                    match reader.read(&mut buf) {
-                        Ok(0) => break,
-                        Ok(n) => {
-                            io::stdout().write_all(&buf[..n])?;
-                            io::stdout().flush()?;
-                            output.extend_from_slice(&buf[..n]);
-                        }
-                        Err(e) if e.kind() == io::ErrorKind::WouldBlock => break,
-                        Err(_) => break,
+                // Drain remaining output from channel
+                while let Ok(event) = output_rx.try_recv() {
+                    if let OutputEvent::Data(data) = event {
+                        io::stdout().write_all(&data)?;
+                        io::stdout().flush()?;
+                        output.extend_from_slice(&data);
                     }
                 }
 
@@ -424,9 +464,81 @@ impl PtyExecutor {
                 });
             }
 
-            // Check idle timeout
-            if let Some(timeout_duration) = timeout {
-                if last_activity.elapsed() > timeout_duration {
+            // Build the timeout future (or a never-completing one if disabled)
+            let timeout_future = async {
+                match timeout_duration {
+                    Some(d) => tokio::time::sleep(d).await,
+                    None => std::future::pending::<()>().await,
+                }
+            };
+
+            tokio::select! {
+                // PTY output received
+                output_event = output_rx.recv() => {
+                    match output_event {
+                        Some(OutputEvent::Data(data)) => {
+                            io::stdout().write_all(&data)?;
+                            io::stdout().flush()?;
+                            output.extend_from_slice(&data);
+                            // Activity detected - timeout will reset on next iteration
+                        }
+                        Some(OutputEvent::Eof) => {
+                            debug!("PTY EOF received");
+                            break;
+                        }
+                        Some(OutputEvent::Error(e)) => {
+                            debug!(error = %e, "PTY read error");
+                            break;
+                        }
+                        None => {
+                            // Channel closed, reader thread exited
+                            break;
+                        }
+                    }
+                }
+
+                // User input received
+                input_event = async { input_rx.recv().await } => {
+                    match input_event {
+                        Some(InputEvent::CtrlC) => {
+                            match ctrl_c_state.handle_ctrl_c(Instant::now()) {
+                                CtrlCAction::ForwardAndStartWindow => {
+                                    // Forward Ctrl+C to Claude
+                                    let _ = writer.write_all(&[3]);
+                                    let _ = writer.flush();
+                                    // Activity: user input resets timeout
+                                }
+                                CtrlCAction::Terminate => {
+                                    info!("Double Ctrl+C detected, terminating");
+                                    termination = TerminationType::UserInterrupt;
+                                    should_terminate.store(true, Ordering::SeqCst);
+                                    self.terminate_child(&mut child, true)?;
+                                    break;
+                                }
+                            }
+                        }
+                        Some(InputEvent::CtrlBackslash) => {
+                            info!("Ctrl+\\ detected, force killing");
+                            termination = TerminationType::ForceKill;
+                            should_terminate.store(true, Ordering::SeqCst);
+                            self.terminate_child(&mut child, false)?;
+                            break;
+                        }
+                        Some(InputEvent::Data(data)) => {
+                            // Forward to Claude
+                            let _ = writer.write_all(&data);
+                            let _ = writer.flush();
+                            // Activity: user input resets timeout
+                        }
+                        None => {
+                            // Input channel closed (stdin EOF)
+                            debug!("Input channel closed");
+                        }
+                    }
+                }
+
+                // Idle timeout expired
+                _ = timeout_future => {
                     warn!(
                         timeout_secs = self.config.idle_timeout_secs,
                         "Idle timeout triggered"
@@ -437,77 +549,9 @@ impl PtyExecutor {
                     break;
                 }
             }
-
-            // Check for force kill flag
-            if force_kill.load(Ordering::SeqCst) {
-                termination = TerminationType::ForceKill;
-                should_terminate.store(true, Ordering::SeqCst);
-                self.terminate_child(&mut child, false)?;
-                break;
-            }
-
-            // Process input events (non-blocking)
-            while let Ok(event) = input_rx.try_recv() {
-                match event {
-                    InputEvent::CtrlC => {
-                        match ctrl_c_state.handle_ctrl_c(Instant::now()) {
-                            CtrlCAction::ForwardAndStartWindow => {
-                                // Forward Ctrl+C to Claude
-                                let _ = writer.write_all(&[3]);
-                                let _ = writer.flush();
-                                last_activity = Instant::now();
-                            }
-                            CtrlCAction::Terminate => {
-                                info!("Double Ctrl+C detected, terminating");
-                                termination = TerminationType::UserInterrupt;
-                                should_terminate.store(true, Ordering::SeqCst);
-                                self.terminate_child(&mut child, true)?;
-                            }
-                        }
-                    }
-                    InputEvent::CtrlBackslash => {
-                        info!("Ctrl+\\ detected, force killing");
-                        force_kill_clone.store(true, Ordering::SeqCst);
-                    }
-                    InputEvent::Data(data) => {
-                        // Forward to Claude
-                        let _ = writer.write_all(&data);
-                        let _ = writer.flush();
-                        last_activity = Instant::now();
-                    }
-                }
-
-                // Exit loop if termination requested
-                if should_terminate.load(Ordering::SeqCst) {
-                    break;
-                }
-            }
-
-            if should_terminate.load(Ordering::SeqCst) {
-                break;
-            }
-
-            // Read output
-            match reader.read(&mut buf) {
-                Ok(0) => break, // EOF
-                Ok(n) => {
-                    io::stdout().write_all(&buf[..n])?;
-                    io::stdout().flush()?;
-                    output.extend_from_slice(&buf[..n]);
-                    last_activity = Instant::now();
-                }
-                Err(e) if e.kind() == io::ErrorKind::WouldBlock => {
-                    std::thread::sleep(Duration::from_millis(10));
-                }
-                Err(e) if e.kind() == io::ErrorKind::Interrupted => {}
-                Err(e) => {
-                    debug!(error = %e, "PTY read error");
-                    break;
-                }
-            }
         }
 
-        // Ensure termination flag is set for input thread
+        // Ensure termination flag is set for spawned threads
         should_terminate.store(true, Ordering::SeqCst);
 
         // Wait for child to fully exit
@@ -571,6 +615,17 @@ enum InputEvent {
     CtrlBackslash,
     /// Regular data to forward.
     Data(Vec<u8>),
+}
+
+/// Output events from the PTY.
+#[derive(Debug)]
+enum OutputEvent {
+    /// Data received from PTY.
+    Data(Vec<u8>),
+    /// PTY reached EOF (process exited).
+    Eof,
+    /// Error reading from PTY.
+    Error(String),
 }
 
 /// Strips ANSI escape sequences from raw bytes.

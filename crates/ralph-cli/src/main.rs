@@ -904,7 +904,7 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool)
 
         // Execute the prompt (PTY or headless mode)
         let (output, success) = if use_pty {
-            execute_pty(&backend, &config, &prompt)?
+            execute_pty(&backend, &config, &prompt).await?
         } else {
             let executor = CliExecutor::new(backend.clone());
             let result = executor.execute(&prompt, stdout()).await?;
@@ -947,7 +947,7 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool)
 }
 
 /// Executes a prompt in PTY mode with raw terminal handling.
-fn execute_pty(
+async fn execute_pty(
     backend: &CliBackend,
     config: &RalphConfig,
     prompt: &str,
@@ -977,7 +977,7 @@ fn execute_pty(
 
     // Run PTY executor
     let result = if config.cli.pty_interactive {
-        executor.run_interactive(prompt)
+        executor.run_interactive(prompt).await
     } else {
         executor.run_observe(prompt)
     };
