@@ -502,23 +502,21 @@ fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
     }
 
     // Read and filter events
-    let mut records = if let Some(n) = args.last {
-        history.read_last(n)?
-    } else if let Some(ref topic) = args.topic {
-        history.filter_by_topic(topic)?
-    } else if let Some(iteration) = args.iteration {
-        history.filter_by_iteration(iteration)?
-    } else {
-        history.read_all()?
-    };
+    let mut records = history.read_all()?;
 
-    // Apply secondary filters (topic + last, etc.)
-    if args.last.is_some() {
-        if let Some(ref topic) = args.topic {
-            records.retain(|r| r.topic == *topic);
-        }
-        if let Some(iteration) = args.iteration {
-            records.retain(|r| r.iteration == iteration);
+    // Apply filters in sequence
+    if let Some(ref topic) = args.topic {
+        records.retain(|r| r.topic == *topic);
+    }
+    
+    if let Some(iteration) = args.iteration {
+        records.retain(|r| r.iteration == iteration);
+    }
+    
+    // Apply 'last' filter after other filters (to get last N of filtered results)
+    if let Some(n) = args.last {
+        if records.len() > n {
+            records = records.into_iter().rev().take(n).rev().collect();
         }
     }
 
