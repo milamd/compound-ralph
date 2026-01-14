@@ -81,11 +81,6 @@ impl EventBus {
 
         // Otherwise, route to all subscribers
         for (id, hat) in &self.hats {
-            // Don't route back to source
-            if event.source.as_ref() == Some(id) {
-                continue;
-            }
-
             if hat.is_subscribed(&event.topic) {
                 self.pending
                     .entry(id.clone())
@@ -193,7 +188,10 @@ mod tests {
     }
 
     #[test]
-    fn test_no_self_routing() {
+    fn test_self_routing_allowed() {
+        // Self-routing is allowed to handle LLM non-determinism.
+        // If a hat emits an event it subscribes to, it should still receive it.
+        // Loop prevention is handled by thrashing detection, not source filtering.
         let mut bus = EventBus::new();
 
         let hat = Hat::new("impl", "Implementer").subscribe("*");
@@ -202,8 +200,9 @@ mod tests {
         let event = Event::new("impl.done", "Done").with_source("impl");
         let recipients = bus.publish(event);
 
-        // Event should not route back to source
-        assert!(recipients.is_empty());
+        // Event SHOULD route back to source (self-routing allowed)
+        assert_eq!(recipients.len(), 1);
+        assert_eq!(recipients[0].as_str(), "impl");
     }
 
     #[test]

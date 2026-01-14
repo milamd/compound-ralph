@@ -1,6 +1,7 @@
 ---
 status: review
-gap_analysis: null
+gap_analysis: 2026-01-13
+last_updated: 2026-01-13
 related:
   - event-loop.spec.md
   - cli-adapters.spec.md
@@ -94,6 +95,8 @@ Ralph orchestrates the agent headlessly.
 | **Output** | Piped to stdout; ANSI intentionally stripped for event parsing |
 | **Timeout** | Per-adapter timeout applies (see [cli-adapters.spec.md](cli-adapters.spec.md)) |
 | **Use case** | CI, automation, background loops |
+
+**Note:** Claude requires PTY even in autonomous mode (see [adapters/claude.spec.md](adapters/claude.spec.md)). When using Claude with structured JSON output (`--output-format stream-json`), Ralph spawns a PTY but parses NDJSON instead of raw terminal output. This provides structured events for TUI updates while satisfying Claude's TTY requirement.
 
 ### Interactive Mode (`-i`)
 

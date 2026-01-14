@@ -3,21 +3,22 @@
 > **Note:** When a known issue is fixed, remove it from this file. An empty file means no known issues.
 >
 > Generated from behavioral gap analysis on 2026-01-13
+> **Validated against codebase:** 2026-01-13 (gap analysis iteration)
 
 ## Summary
 
-| Priority | Issue | Impact |
-|----------|-------|--------|
-| 🔴 P0 | Backpressure not enforced | Builder can skip tests |
-| 🔴 P0 | Task-level block tracking missing | Loop terminates instead of replanning |
-| 🟡 P1 | Planner behaviors instruction-only | No verification of compliance |
-| 🟡 P1 | Builder behaviors instruction-only | No verification of compliance |
-| 🟡 P1 | Broken preset: gap-analysis.yml | Multi-document YAML parse error |
-| 🟡 P1 | Broken preset: review.yml | Multi-document YAML parse error |
-| 🟡 P1 | Broken preset: refactor.yml | Ambiguous routing (refactor.done) |
-| 🟢 P2 | Scratchpad persistence not verified | State could be lost |
-| 🟢 P2 | Hat display order is random | Minor UX confusion |
-| 🟡 P1 | Broken ralph.yml in repo root | Default config causes parse error |
+| Priority | Issue | Impact | Status |
+|----------|-------|--------|--------|
+| 🔴 P0 | Backpressure not enforced | Builder can skip tests | ✅ Confirmed |
+| 🔴 P0 | Task-level block tracking missing | Loop terminates instead of replanning | ✅ Confirmed |
+| 🟡 P1 | Planner behaviors instruction-only | No verification of compliance | ✅ Confirmed |
+| 🟡 P1 | Builder behaviors instruction-only | No verification of compliance | ✅ Confirmed |
+| 🟡 P1 | Broken preset: gap-analysis.yml | Multi-document YAML parse error | ⚠️ Not re-validated |
+| 🟡 P1 | Broken preset: review.yml | Multi-document YAML parse error | ⚠️ Not re-validated |
+| 🟡 P1 | Broken preset: refactor.yml | Ambiguous routing (refactor.done) | ⚠️ Not re-validated |
+| 🟢 P2 | Scratchpad persistence not verified | State could be lost | ✅ Confirmed |
+| 🟢 P2 | Hat display order is random | Minor UX confusion | ✅ Confirmed |
+| 🟡 P1 | Broken ralph.yml in repo root | Default config causes parse error | ⚠️ Not re-validated |
 
 ---
 
@@ -25,11 +26,38 @@
 
 **Behaviors:** BU-002, BU-003, BU-004
 
+**Status:** ✅ **CONFIRMED** via code review (2026-01-13)
+
 **Problem:**
 Spec says builder must run tests/lint/typecheck before emitting `build.done`. Implementation only injects instruction text—orchestrator accepts any `build.done` without verification.
 
 **Impact:**
 Builder can claim success without running checks. Broken code proceeds uncaught.
+
+**Code Evidence:**
+```rust
+// crates/ralph-core/src/event_loop.rs:297-360
+pub fn process_output(
+    &mut self,
+    hat_id: &HatId,
+    output: &str,
+    success: bool,
+) -> Option<TerminationReason> {
+    // ... iteration tracking ...
+    
+    // Parse and publish events from output
+    let parser = EventParser::new().with_source(hat_id.clone());
+    let events = parser.parse(output);
+    
+    // ❌ NO VALIDATION: Events are published without checking evidence
+    for event in events {
+        self.bus.publish(event);
+    }
+    // ...
+}
+```
+
+The `EventParser` (event_parser.rs:1-250) only extracts topic, target, and payload. It does NOT parse or validate evidence of backpressure checks.
 
 **Current:**
 ```
@@ -60,6 +88,8 @@ Orchestrator: Parses evidence, rejects if missing/failed
 
 **Behavior:** PL-005
 
+**Status:** ✅ **CONFIRMED** via code review (2026-01-13)
+
 **Problem:**
 Spec says planner should cancel task `[~]` after 3 consecutive `build.blocked` on the **same task**. Implementation tracks blocks per **hat**, not per task, and terminates the entire loop.
 
@@ -67,6 +97,35 @@ Spec says planner should cancel task `[~]` after 3 consecutive `build.blocked` o
 - Planner cannot make intelligent decisions about stuck tasks
 - Loop terminates with `LoopThrashing` instead of replanning around blocked task
 - No way to identify which specific task is problematic
+
+**Code Evidence:**
+```rust
+// crates/ralph-core/src/event_loop.rs:85-98
+pub struct LoopState {
+    // ...
+    /// Consecutive blocked events from the same hat.
+    pub consecutive_blocked: u32,
+    /// Hat that emitted the last blocked event.
+    pub last_blocked_hat: Option<HatId>,
+}
+
+// crates/ralph-core/src/event_loop.rs:326-343
+// Track build.blocked events for thrashing detection
+let has_blocked_event = events.iter().any(|e| e.topic == "build.blocked".into());
+
+if has_blocked_event {
+    // ❌ WRONG: Checks if same HAT blocked, not same TASK
+    if self.state.last_blocked_hat.as_ref() == Some(hat_id) {
+        self.state.consecutive_blocked += 1;
+    } else {
+        self.state.consecutive_blocked = 1;
+        self.state.last_blocked_hat = Some(hat_id.clone());
+    }
+    // ...
+}
+```
+
+The `EventParser` (event_parser.rs) does NOT extract task identifiers from `build.blocked` payloads. It only parses topic, target, and payload as a string.
 
 **Current:**
 ```rust

@@ -1,6 +1,7 @@
 ---
 status: review
 gap_analysis: 2026-01-13
+last_updated: 2026-01-13
 related:
   - interactive-mode.spec.md
   - event-loop.spec.md
@@ -62,13 +63,13 @@ Custom adapters are appropriate when:
 
 ### Quick Reference
 
-| Backend | Auto-Approve Flag | Prompt Delivery | TTY Required |
-|---------|-------------------|-----------------|--------------|
-| Claude | `--dangerously-skip-permissions` | `-p "prompt"` | **Yes** |
-| Gemini | `--yolo` | `-p "prompt"` | No |
-| Kiro | `--trust-all-tools` | positional arg | No |
-| Codex | `--full-auto` | positional arg | No |
-| Amp | `--dangerously-allow-all` | `-x "prompt"` | No |
+| Backend | Auto-Approve Flag | Prompt Delivery | TTY Required | Structured Output |
+|---------|-------------------|-----------------|--------------|-------------------|
+| Claude | `--dangerously-skip-permissions` | `-p "prompt"` | **Yes** | `--output-format stream-json` |
+| Gemini | `--yolo` | `-p "prompt"` | No | — |
+| Kiro | `--trust-all-tools` | positional arg | No | — |
+| Codex | `--full-auto` | positional arg | No | `--json` |
+| Amp | `--dangerously-allow-all` | `-x "prompt"` | No | — |
 
 ### Custom Adapters
 
@@ -290,6 +291,14 @@ All adapters produce text output that Ralph processes for:
 1. **Event parsing** — `<event topic="...">` XML tags trigger hat changes
 2. **Completion detection** — Configurable promise string (default: `LOOP_COMPLETE`)
 3. **Logging** — Full output captured to `.agent/events.jsonl`
+
+#### Structured Output Mode
+
+Some backends support structured JSON output (see Structured Output column in Quick Reference). When enabled:
+- Output is NDJSON (newline-delimited JSON) instead of plain text
+- Each line is a self-contained event with type, content, and metadata
+- Enables real-time TUI updates for tool calls, token usage, and progress
+- See [adapters/claude.spec.md](adapters/claude.spec.md) for Claude's JSON stream format
 
 ## Acceptance Criteria
 

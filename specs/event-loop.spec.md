@@ -165,6 +165,59 @@ Ralph has several ways to avoid getting stuck:
 
 **The key insight:** Ralph doesn't need to solve everything. Ralph needs to make progress or recognize when to stop. Blocking is information—use it to adjust the plan, not spiral.
 
+## ⚠️ CRITICAL: Self-Routing Is Allowed
+
+**This is a key design decision that affects system resilience.**
+
+Events **CAN** route back to the hat that emitted them. There is NO source-based filtering that prevents a hat from receiving events it published.
+
+### Why This Matters
+
+LLMs are non-deterministic. Even with perfect prompts, an agent might emit the "wrong" event:
+- Planner might emit `build.done` instead of dispatching `build.task`
+- Builder might emit `build.task` instead of `build.done`
+
+If source-based filtering blocked self-routing, this would cause **premature termination**:
+
+```
+❌ WITH source filtering (broken):
+   planner → build.done → (blocked: source=planner) → NO RECIPIENTS → terminate
+
+✅ WITHOUT source filtering (resilient):
+   planner → build.done → planner receives it → continues planning
+```
+
+### Design Rationale
+
+Per **Tenet 2: Backpressure Over Prescription**:
+> Don't prescribe how—create gates that reject bad work... Backpressure is enforceable; instructions are suggestions.
+
+Telling the LLM "only emit build.task" is a suggestion it might ignore. The system must be resilient to this.
+
+### Loop Prevention
+
+Self-routing does NOT cause infinite loops because:
+
+1. **Subscription patterns prevent cycles** — Planner triggers on `build.done`, not `build.task`. Builder triggers on `build.task`, not `build.done`. Even if a hat emits an event it subscribes to, the workflow naturally progresses.
+
+2. **Loop thrashing detection** — If the same hat emits 3+ consecutive `build.blocked` events, the orchestrator terminates with `LoopThrashing`. This is the real safety net.
+
+3. **Fresh context breaks cycles** — Each iteration starts fresh. Even if the agent makes the same mistake, fresh context often self-corrects.
+
+### Acceptance Criteria
+
+- **Given** planner hat emits `build.done` (even though builder "should" emit it)
+- **When** event is routed
+- **Then** planner receives the event and continues (self-routing allowed)
+
+- **Given** any hat emits an event matching its own triggers
+- **When** event is routed
+- **Then** hat receives the event (no source-based blocking)
+
+- **Given** same hat emits 3+ consecutive `build.blocked` events
+- **When** thrashing detection runs
+- **Then** loop terminates with `LoopThrashing` reason (this is the safety net, not source filtering)
+
 ## Event Payloads
 
 ### build.task

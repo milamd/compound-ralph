@@ -1,4 +1,7 @@
-manually test custom hat collections for UX, functionality, etc. document any issues you find in ISSUES.md
+- Study specs thoroughly and perform a gap analysis between the specs and implementation. Catalog any issues you find in ISSUES.md
+- Address any issues that you find.
+- If bugs are found, add them to ISSUES.md. 
 
-use the claude adapter
+SUPER IMPORTANT: Ralph likes to LIE. Validate that the behaviors match what's expected in the acceptance criteria for anything you fix. 
+  
 
