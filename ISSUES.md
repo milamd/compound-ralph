@@ -1,6 +1,301 @@
 # Known Issues
 
 > **Note:** When a known issue is fixed, remove it from this file. An empty file means no known issues.
+>
+> Generated from behavioral gap analysis on 2026-01-13
 
-All known issues have been resolved.
+## Summary
 
+| Priority | Issue | Impact |
+|----------|-------|--------|
+| 🔴 P0 | Backpressure not enforced | Builder can skip tests |
+| 🔴 P0 | Task-level block tracking missing | Loop terminates instead of replanning |
+| 🟡 P1 | Planner behaviors instruction-only | No verification of compliance |
+| 🟡 P1 | Builder behaviors instruction-only | No verification of compliance |
+| 🟡 P1 | Broken preset: gap-analysis.yml | Multi-document YAML parse error |
+| 🟡 P1 | Broken preset: review.yml | Multi-document YAML parse error |
+| 🟡 P1 | Broken preset: refactor.yml | Ambiguous routing (refactor.done) |
+| 🟢 P2 | Scratchpad persistence not verified | State could be lost |
+| 🟢 P2 | Hat display order is random | Minor UX confusion |
+
+---
+
+## 🔴 P0: Backpressure Not Enforced
+
+**Behaviors:** BU-002, BU-003, BU-004
+
+**Problem:**
+Spec says builder must run tests/lint/typecheck before emitting `build.done`. Implementation only injects instruction text—orchestrator accepts any `build.done` without verification.
+
+**Impact:**
+Builder can claim success without running checks. Broken code proceeds uncaught.
+
+**Current:**
+```
+Prompt says: "Backpressure is law - tests/typecheck/lint must pass"
+Orchestrator: Accepts any build.done event
+```
+
+**Expected:**
+```
+Builder emits: build.done with evidence (tests passed, lint passed)
+Orchestrator: Parses evidence, rejects if missing/failed
+```
+
+**Fix:**
+1. Define evidence schema for `build.done` payload
+2. Parse evidence in `event_parser.rs`
+3. Reject `build.done` without valid evidence in `event_loop.rs`
+4. On rejection, synthesize `build.blocked` with "missing backpressure evidence"
+
+**Files:**
+- `crates/ralph-core/src/event_parser.rs`
+- `crates/ralph-core/src/event_loop.rs`
+- `crates/ralph-core/src/instructions.rs` (update builder prompt with evidence format)
+
+---
+
+## 🔴 P0: Task-Level Block Tracking Missing
+
+**Behavior:** PL-005
+
+**Problem:**
+Spec says planner should cancel task `[~]` after 3 consecutive `build.blocked` on the **same task**. Implementation tracks blocks per **hat**, not per task, and terminates the entire loop.
+
+**Impact:**
+- Planner cannot make intelligent decisions about stuck tasks
+- Loop terminates with `LoopThrashing` instead of replanning around blocked task
+- No way to identify which specific task is problematic
+
+**Current:**
+```rust
+// LoopState tracks:
+consecutive_blocked: u32,        // Per-hat counter
+last_blocked_hat: Option<HatId>, // Which hat blocked
+
+// After 3 blocks from same hat → LoopThrashing termination
+```
+
+**Expected:**
+```rust
+// LoopState should track:
+blocked_task_counts: HashMap<String, u32>,  // Per-task counter
+last_blocked_task: Option<String>,          // Which task blocked
+
+// After 3 blocks on same task → inject into planner prompt
+// Planner decides: cancel [~], replan, or escalate
+```
+
+**Fix:**
+1. Add `blocked_task_counts: HashMap<String, u32>` to `LoopState`
+2. Parse task identifier from `build.blocked` event payload
+3. Inject per-task block counts into planner prompt context
+4. Update planner instructions to explain cancellation option
+5. Keep loop-level thrashing detection as final safeguard
+
+**Files:**
+- `crates/ralph-core/src/event_loop.rs` (LoopState)
+- `crates/ralph-core/src/event_parser.rs` (extract task ID from blocked event)
+- `crates/ralph-core/src/instructions.rs` (inject block counts, update planner instructions)
+
+---
+
+## 🟡 P1: Planner Behaviors Are Instruction-Only
+
+**Behaviors:** PL-001 through PL-006, PL-008 through PL-015
+
+**Problem:**
+Planner is instructed to:
+- Read specs directory
+- Create/manage scratchpad
+- Dispatch ONE task at a time
+- Mark completed tasks [x]
+- Prioritize ISSUES.md fixes
+- Validate work matches spec
+
+But orchestrator doesn't verify any of this. Planner could deviate without detection.
+
+**Impact:**
+- Planner could dispatch multiple tasks (overloading builder)
+- Planner could ignore specs
+- Planner could skip scratchpad updates
+- Silent deviations from expected behavior
+
+**Recommendation:**
+Trust-but-verify approach (don't hard-fail, but log):
+1. Parse `build.task` payload, warn if multiple tasks detected
+2. After planner iteration, check scratchpad was modified
+3. Log warnings for suspicious patterns
+4. Use verification data for quality metrics
+
+**Files:**
+- `crates/ralph-core/src/event_loop.rs` (post-iteration verification)
+- `crates/ralph-core/src/event_parser.rs` (parse build.task for task count)
+
+---
+
+## 🟡 P1: Builder Behaviors Are Instruction-Only
+
+**Behaviors:** BU-001, BU-005 through BU-015
+
+**Problem:**
+Builder is instructed to:
+- Implement ONE task per iteration
+- Commit on success
+- Mark task [x] in scratchpad
+- Handle missing files gracefully
+- Provide unblock recommendations
+
+But orchestrator doesn't verify any of this.
+
+**Impact:**
+Similar to planner—builder could deviate without detection.
+
+**Recommendation:**
+Trust-but-verify approach:
+1. Parse `build.done` for evidence of commit (commit hash in payload?)
+2. Verify scratchpad has new [x] after builder iteration
+3. Parse `build.blocked` for recommendation text, warn if missing
+4. Log metrics for verification coverage
+
+**Files:**
+- `crates/ralph-core/src/event_loop.rs`
+- `crates/ralph-core/src/event_parser.rs`
+
+---
+
+## 🟢 P2: Scratchpad Persistence Not Verified
+
+**Behavior:** CB-001
+
+**Problem:**
+Spec says scratchpad content persists across iterations. Implementation tells hats about scratchpad path but doesn't verify it exists or was updated.
+
+**Impact:**
+If agent doesn't read/write scratchpad, state is lost. Usually works because Claude follows instructions, but not guaranteed.
+
+**Recommendation:**
+1. Read scratchpad at iteration start
+2. Inject content snippet into prompt as context
+3. After write-expected iterations (planner), verify modification time changed
+4. Warn if scratchpad stale
+
+**Files:**
+- `crates/ralph-core/src/event_loop.rs`
+- `crates/ralph-core/src/instructions.rs`
+
+---
+
+## 🟡 P1: Broken Preset - gap-analysis.yml
+
+**Problem:**
+The `presets/gap-analysis.yml` file uses YAML document separator `---` (line 186) to include a reference section at the end. The `serde_yaml` library doesn't support multi-document YAML parsing, causing a parse error.
+
+**Error:**
+```
+YAML parse error: deserializing from YAML containing more than one document is not supported
+```
+
+**Impact:**
+Users cannot use the gap-analysis preset at all. Running `ralph run --config presets/gap-analysis.yml` fails immediately.
+
+**Fix Options:**
+1. **Remove the separator**: Convert the reference section into a YAML comment block (`#` prefix)
+2. **Move to separate file**: Put the reference material in a `gap-analysis-reference.md` file
+
+**Location:** `presets/gap-analysis.yml:186`
+
+---
+
+## 🟡 P1: Broken Preset - review.yml
+
+**Problem:**
+The `presets/review.yml` file uses YAML document separator `---` (line 98) to include a reference section. Same root cause as gap-analysis.yml.
+
+**Error:**
+```
+YAML parse error: deserializing from YAML containing more than one document is not supported
+```
+
+**Impact:**
+Users cannot use the review preset. Running `ralph run --config presets/review.yml` fails immediately.
+
+**Fix:**
+Same as gap-analysis.yml - convert reference section to comments or move to separate file.
+
+**Location:** `presets/review.yml:98`
+
+---
+
+## 🟡 P1: Broken Preset - refactor.yml
+
+**Problem:**
+The `presets/refactor.yml` file has an ambiguous routing configuration. The trigger `refactor.done` is claimed by both:
+- `planner` hat (line 26)
+- `verifier` hat (line 107)
+
+The config validation correctly rejects this, but the preset ships broken.
+
+**Error:**
+```
+Ambiguous routing: trigger 'refactor.done' is claimed by both 'planner' and 'verifier'
+```
+
+**Impact:**
+Users cannot use the refactor preset. The validation catches this correctly, so it fails safely (no runtime confusion).
+
+**Expected Behavior:**
+Looking at the intended workflow:
+```
+refactor.task → [refactorer] → refactor.done → [verifier] → verify.passed → [planner]
+```
+
+The verifier should own `refactor.done`, and planner should trigger on `verify.passed` and `verify.failed` instead.
+
+**Fix:**
+Update `presets/refactor.yml` planner triggers:
+```yaml
+# Current (broken):
+triggers: ["task.start", "task.resume", "refactor.done", "refactor.blocked", "verify.failed"]
+
+# Fixed:
+triggers: ["task.start", "task.resume", "verify.passed", "verify.failed", "refactor.blocked"]
+```
+
+**Location:** `presets/refactor.yml:26`
+
+---
+
+## 🟢 P2: Hat Display Order Is Random
+
+**Problem:**
+When displaying hats in dry-run output, the CLI uses `HashMap.keys()` which iterates in non-deterministic order. Users see hats in random order rather than the logical workflow order.
+
+**Example:**
+```
+Dry run mode - configuration:
+  Hats: reviewer, builder, planner  # Random order
+```
+
+Expected:
+```
+  Hats: planner, builder, reviewer  # Workflow order
+```
+
+**Impact:**
+Minor UX confusion. Users may expect to see hats in the order they appear in the config file or in workflow order.
+
+**Fix Options:**
+1. Use `IndexMap` instead of `HashMap` for `config.hats` to preserve insertion order
+2. Sort hat names alphabetically for consistent display
+3. Sort by trigger order (task.start first, etc.)
+
+**Location:** `crates/ralph-cli/src/main.rs:346`
+
+---
+
+## Resolved Issues
+
+_(Move issues here when fixed, then delete after next release)_
+
+None yet.

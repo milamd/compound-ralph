@@ -222,6 +222,143 @@ See the **Behavioral Test Catalog** section below.
 
 ---
 
+### Level 5b: Ralph-as-Verifier (Assumes: Events Route)
+
+**The Meta Approach:** Use Ralph to verify Ralph's behavior.
+
+Once Level 4 passes (events route correctly), Ralph is trustworthy enough to analyze its own artifacts. We add a **verifier hat** that reads behavioral specs and checks assertions against recorded sessions.
+
+**Why this works:**
+- Ralph excels at reading specs and checking implementations
+- Session files are structured data Ralph can parse
+- Verification is read-only (no risk of breaking things)
+- LLM can reason about complex behavioral assertions
+
+**Verifier Hat Configuration:**
+
+```yaml
+hats:
+  verifier:
+    triggers: ["verify.start"]
+    publishes: ["verify.done"]
+    instructions: |
+      You are a behavioral verification agent for Ralph Orchestrator.
+
+      ## Your Task
+      Given a behavior specification and test artifacts, determine if the
+      behavior was correctly exhibited.
+
+      ## Inputs Available
+      - Behavior spec: ID, description, expected assertions
+      - Session file: .agent/session.jsonl (all events from the test run)
+      - Workspace: files created/modified during the run
+      - Scratchpad: .agent/scratchpad.md final state
+
+      ## Verification Process
+      1. Parse the session.jsonl file to extract events
+      2. For each assertion in the spec:
+         - Find relevant evidence in session/files/scratchpad
+         - Determine if assertion holds
+         - Document your reasoning
+      3. Output structured verdict
+
+      ## Output Format
+      <event topic="verify.done">
+      {
+        "behavior_id": "PL-007",
+        "verdict": "PASS" | "FAIL",
+        "assertions": [
+          {"assertion": "completion_promise_output", "result": "PASS", "evidence": "..."},
+          {"assertion": "all_tasks_complete", "result": "PASS", "evidence": "..."}
+        ],
+        "reasoning": "Overall explanation of verification"
+      }
+      </event>
+
+      ## Important
+      - You are VERIFYING, not EXECUTING. Do not run any commands.
+      - Base verdicts only on evidence in the artifacts.
+      - If evidence is ambiguous, note this in reasoning.
+      - A single failed assertion means overall FAIL.
+```
+
+**Verification Command:**
+
+```bash
+# Execute test run (Phase 1)
+ralph --backend mock \
+      --mock-responses "$(cat cassettes/pl-007.yaml)" \
+      --max-iterations 3 \
+      --workspace /tmp/test-pl-007 \
+      "Complete all tasks"
+
+# Verify with Ralph (Phase 2)
+ralph --hat verifier \
+      --workspace /tmp/test-pl-007 \
+      --verify-behavior PL-007 \
+      --verify-spec ./specs/behavioral-verification.spec.md
+```
+
+**Example Verification Session:**
+
+```
+═══════════════════════════════════════════════════════════════════
+ VERIFICATION │ 🔍 verifier │ Behavior PL-007
+═══════════════════════════════════════════════════════════════════
+
+Reading behavior spec PL-007: "Planner outputs completion promise when done"
+
+Assertions to verify:
+  1. All tasks marked [x] or [~] in scratchpad
+  2. Output contains LOOP_COMPLETE
+  3. Termination reason is CompletionPromise
+
+Analyzing session.jsonl...
+  - Found 3 iterations
+  - Final iteration hat: planner
+  - Events: task.start → build.task → build.done → build.task → build.done
+
+Checking assertion 1: task completion markers
+  ✓ Scratchpad shows: "- [x] Implement feature A"
+  ✓ Scratchpad shows: "- [x] Implement feature B"
+  ✓ No pending tasks found
+  PASS
+
+Checking assertion 2: completion promise in output
+  ✓ Iteration 3 output contains "LOOP_COMPLETE"
+  PASS
+
+Checking assertion 3: termination reason
+  ✓ _meta.termination shows reason: "CompletionPromise"
+  PASS
+
+<event topic="verify.done">
+{"behavior_id": "PL-007", "verdict": "PASS", "assertions": [...]}
+</event>
+```
+
+**Advantages of Ralph-as-Verifier:**
+
+| Aspect | Benefit |
+|--------|---------|
+| **Complex assertions** | LLM can interpret nuanced behavioral requirements |
+| **Readable output** | Natural language explanation of pass/fail |
+| **Flexible matching** | Don't need exact string matches, can understand intent |
+| **Self-documenting** | Verification reasoning is captured |
+| **Spec-driven** | Same specs used for implementation guide verification |
+
+**When to use Ralph-as-Verifier vs. Script-based:**
+
+| Scenario | Approach |
+|----------|----------|
+| Exact string match | Script (faster, deterministic) |
+| Event sequence check | Script (jq is sufficient) |
+| "Did planner create reasonable tasks?" | Ralph (needs reasoning) |
+| "Is the code style consistent?" | Ralph (subjective) |
+| "Did builder follow the spec intent?" | Ralph (interpretation needed) |
+
+---
+
 ### Level 6: Quality Evaluation (Assumes: Behaviors Work)
 
 **Assumes:** Ralph behaves correctly. Evaluates subjective quality.
@@ -238,6 +375,186 @@ ralph-test evaluate \
 **This level is optional for correctness** - it evaluates quality, not functionality.
 
 ---
+
+## Batch Verification with Ralph
+
+### The verify-behaviors Skill
+
+Create a `/verify-behaviors` skill that orchestrates full catalog verification:
+
+```bash
+# Verify all behaviors in catalog
+ralph /verify-behaviors
+
+# Verify specific category
+ralph /verify-behaviors --category planner
+
+# Verify single behavior
+ralph /verify-behaviors --id PL-007
+```
+
+**What happens internally:**
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    /verify-behaviors                             │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+        ┌─────────────────────┼─────────────────────┐
+        ▼                     ▼                     ▼
+┌───────────────┐   ┌───────────────┐   ┌───────────────┐
+│ Load Catalog  │   │ For each      │   │ Aggregate     │
+│ from spec.md  │ → │ behavior:     │ → │ Results       │
+│               │   │ - Setup       │   │               │
+│               │   │ - Execute     │   │ 78 behaviors  │
+│               │   │ - Verify      │   │ 75 PASS       │
+│               │   │ - Cleanup     │   │ 3 FAIL        │
+└───────────────┘   └───────────────┘   └───────────────┘
+```
+
+### Two-Phase Verification Loop
+
+For each behavior in the catalog:
+
+**Phase 1: Execute (Deterministic)**
+```bash
+# Run Ralph with mock/replay to produce artifacts
+ralph --backend mock \
+      --mock-responses "$(cat cassettes/${behavior_id}.yaml)" \
+      --workspace /tmp/verify-${behavior_id} \
+      --max-iterations ${max_iter} \
+      "${task_prompt}"
+```
+
+**Phase 2: Verify (Ralph-as-Verifier)**
+```bash
+# Run Ralph with verifier hat to check artifacts
+ralph --hat verifier \
+      --workspace /tmp/verify-${behavior_id} \
+      --verify-behavior ${behavior_id} \
+      --verify-spec ./specs/behavioral-verification.spec.md \
+      --output-format json
+```
+
+### Verification Report Structure
+
+```json
+{
+  "catalog": "behavioral-verification.spec.md",
+  "timestamp": "2026-01-13T10:30:00Z",
+  "summary": {
+    "total": 78,
+    "passed": 75,
+    "failed": 3,
+    "skipped": 0
+  },
+  "by_category": {
+    "event-routing": {"total": 10, "passed": 10, "failed": 0},
+    "planner-behaviors": {"total": 15, "passed": 14, "failed": 1},
+    "builder-behaviors": {"total": 15, "passed": 13, "failed": 2},
+    "safeguards": {"total": 12, "passed": 12, "failed": 0},
+    "completion-detection": {"total": 8, "passed": 8, "failed": 0},
+    "core-behaviors": {"total": 8, "passed": 8, "failed": 0},
+    "integration": {"total": 10, "passed": 10, "failed": 0}
+  },
+  "failures": [
+    {
+      "id": "PL-005",
+      "description": "Planner cancels stuck tasks [~]",
+      "verdict": "FAIL",
+      "evidence": "After 3 build.blocked events, task still marked [ ] not [~]",
+      "reasoning": "Planner did not detect consecutive blocks from same task"
+    },
+    {
+      "id": "BU-002",
+      "description": "Builder runs backpressure (tests)",
+      "verdict": "FAIL",
+      "evidence": "No test execution found in session before build.done",
+      "reasoning": "Builder emitted build.done without running cargo test"
+    }
+  ],
+  "behaviors": [
+    {"id": "ER-001", "verdict": "PASS", "duration_ms": 1200},
+    {"id": "ER-002", "verdict": "PASS", "duration_ms": 1100},
+    // ... all 78 behaviors
+  ]
+}
+```
+
+### Integration with test-tools Spec
+
+The `/verify-behaviors` skill uses test-tools under the hood:
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│                    /verify-behaviors                             │
+│                                                                  │
+│  Uses:                                                           │
+│  ├── test_setup()      - Create isolated workspace               │
+│  ├── test_run()        - Execute with mock/replay                │
+│  ├── test_inspect()    - Parse session for verifier              │
+│  ├── test_evaluate()   - Ralph-as-verifier (judge preset)        │
+│  ├── test_report()     - Generate JUnit/JSON output              │
+│  └── test_cleanup()    - Remove workspace                        │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### When Ralph Finds Failures
+
+When verification fails, Ralph can help diagnose:
+
+```bash
+# Get detailed diagnosis for a failure
+ralph /diagnose-failure --behavior PL-005
+
+# Ralph analyzes:
+# 1. The behavior spec (what should happen)
+# 2. The session recording (what did happen)
+# 3. The code implementation (why it might fail)
+# 4. Suggests fixes
+```
+
+**Example diagnosis output:**
+
+```
+═══════════════════════════════════════════════════════════════════
+ DIAGNOSIS │ PL-005: Planner cancels stuck tasks [~]
+═══════════════════════════════════════════════════════════════════
+
+## Expected Behavior
+After 3 consecutive build.blocked events for the same task,
+planner should mark it [~] (cancelled) in scratchpad.
+
+## What Happened
+Session shows:
+  - Iteration 1: build.blocked (task: "Add auth")
+  - Iteration 2: build.blocked (task: "Add auth")
+  - Iteration 3: build.blocked (task: "Add auth")
+  - Iteration 4: build.task (task: "Add auth")  ← Should have been cancelled
+
+Scratchpad final state:
+  - [ ] Add auth  ← Still pending, should be [~]
+
+## Root Cause Analysis
+Examining crates/ralph-core/src/instructions.rs:142
+
+The planner instructions mention "after 3 consecutive blocks, cancel"
+but there's no mechanism to:
+  1. Track which task caused each block
+  2. Count consecutive blocks per task
+  3. Signal cancellation to the prompt
+
+## Suggested Fix
+Add to LoopState:
+  - blocked_task_counts: HashMap<String, u32>
+  - Increment on build.blocked with task identifier
+  - Include count in planner prompt context
+  - Reset count when task changes
+
+## Files to Modify
+  - crates/ralph-core/src/event_loop.rs (LoopState)
+  - crates/ralph-core/src/instructions.rs (prompt injection)
+```
 
 ## Progressive CI Pipeline
 
