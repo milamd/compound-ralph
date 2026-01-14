@@ -17,6 +17,7 @@ use ralph_tui::Tui;
 use std::io::{stdout, IsTerminal};
 use std::path::PathBuf;
 use std::process::Command;
+use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
 // Unix-specific process management for process group leadership
@@ -1058,11 +1059,15 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
         };
 
         // Execute the prompt (interactive or autonomous mode)
+        // Get per-adapter timeout from config
+        let timeout_secs = config.adapter_settings(&config.cli.backend).timeout;
+        let timeout = Some(Duration::from_secs(timeout_secs));
+
         let (output, success) = if use_interactive {
             execute_pty(&backend, &config, &prompt).await?
         } else {
             let executor = CliExecutor::new(backend.clone());
-            let result = executor.execute(&prompt, stdout()).await?;
+            let result = executor.execute(&prompt, stdout(), timeout).await?;
             (result.output, result.success)
         };
 

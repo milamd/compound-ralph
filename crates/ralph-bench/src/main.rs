@@ -18,6 +18,7 @@ use ralph_core::{
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter};
 use std::path::PathBuf;
+use std::time::Duration;
 use tracing::{info, warn};
 
 /// Ralph Benchmark Harness - Record, replay, and benchmark orchestration loops
@@ -464,8 +465,12 @@ async fn run_task_loop(
         };
 
         // Execute the prompt (capture output but don't print to stdout)
+        // Get per-adapter timeout from config
+        let timeout_secs = config.adapter_settings(&config.cli.backend).timeout;
+        let timeout = Some(Duration::from_secs(timeout_secs));
+
         let mut output_buf = Vec::new();
-        let result = executor.execute(&prompt, &mut output_buf).await?;
+        let result = executor.execute(&prompt, &mut output_buf, timeout).await?;
 
         // Process output
         if let Some(reason) = event_loop.process_output(&hat_id, &result.output, result.success) {
