@@ -165,6 +165,17 @@ impl EventLoop {
         &self.registry
     }
 
+    /// Sets an observer that receives all published events.
+    ///
+    /// This enables external components (like TUI) to monitor the event stream
+    /// without modifying the routing logic.
+    pub fn set_observer<F>(&mut self, observer: F)
+    where
+        F: Fn(&Event) + Send + 'static,
+    {
+        self.bus.set_observer(observer);
+    }
+
     /// Checks if any termination condition is met.
     pub fn check_termination(&self) -> Option<TerminationReason> {
         let cfg = &self.config.event_loop;

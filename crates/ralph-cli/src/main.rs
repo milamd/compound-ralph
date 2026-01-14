@@ -13,6 +13,7 @@ use clap::{Parser, Subcommand, ValueEnum};
 use ralph_adapters::{detect_backend, CliBackend, CliExecutor, PtyConfig, PtyExecutor};
 use ralph_core::{EventHistory, EventLogger, EventLoop, EventParser, EventRecord, RalphConfig, SummaryWriter, TerminationReason};
 use ralph_proto::{Event, HatId};
+use ralph_tui::Tui;
 use std::io::{stdout, IsTerminal};
 use std::path::PathBuf;
 use std::process::Command;
@@ -173,6 +174,10 @@ struct RunArgs {
     /// Set to 0 to disable idle timeout.
     #[arg(long)]
     idle_timeout: Option<u32>,
+
+    /// Enable terminal UI for real-time monitoring
+    #[arg(long)]
+    tui: bool,
 }
 
 /// Arguments for the resume subcommand.
@@ -196,6 +201,10 @@ struct ResumeArgs {
     /// Idle timeout in seconds for interactive mode
     #[arg(long)]
     idle_timeout: Option<u32>,
+
+    /// Enable terminal UI for real-time monitoring
+    #[arg(long)]
+    tui: bool,
 }
 
 /// Arguments for the events subcommand.
@@ -251,6 +260,7 @@ async fn main() -> Result<()> {
                 interactive: false,
                 autonomous: false,
                 idle_timeout: None,
+                tui: false,
             };
             run_command(cli.config, cli.verbose, cli.color, args).await
         }
@@ -365,7 +375,7 @@ async fn run_command(
     }
 
     // Run the orchestration loop and exit with proper exit code
-    let reason = run_loop(config, color_mode).await?;
+    let reason = run_loop(config, color_mode, args.tui).await?;
     let exit_code = reason.exit_code();
 
     // Use explicit exit for non-zero codes to ensure proper exit status
@@ -457,7 +467,7 @@ async fn resume_command(
     // Run the orchestration loop in resume mode
     // The key difference: we publish task.resume instead of task.start,
     // signaling the planner to read the existing scratchpad
-    let reason = run_loop_impl(config, color_mode, true).await?;
+    let reason = run_loop_impl(config, color_mode, true, args.tui).await?;
     let exit_code = reason.exit_code();
 
     if exit_code != 0 {
@@ -757,15 +767,15 @@ fn resolve_prompt_content(event_loop_config: &ralph_core::EventLoopConfig) -> Re
     )
 }
 
-async fn run_loop(config: RalphConfig, color_mode: ColorMode) -> Result<TerminationReason> {
-    run_loop_impl(config, color_mode, false).await
+async fn run_loop(config: RalphConfig, color_mode: ColorMode, enable_tui: bool) -> Result<TerminationReason> {
+    run_loop_impl(config, color_mode, false, enable_tui).await
 }
 
 /// Core loop implementation supporting both fresh start and resume modes.
 ///
 /// `resume`: If true, publishes `task.resume` instead of `task.start`,
 /// signaling the planner to read existing scratchpad rather than doing fresh gap analysis.
-async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool) -> Result<TerminationReason> {
+async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool, enable_tui: bool) -> Result<TerminationReason> {
     use std::sync::atomic::{AtomicBool, Ordering};
     use std::sync::Arc;
 
@@ -851,6 +861,16 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool)
         event_loop.initialize(&prompt_content);
     }
 
+    // Set up TUI if enabled
+    let tui_handle = if enable_tui {
+        let tui = Tui::new();
+        let observer = tui.observer();
+        event_loop.set_observer(observer);
+        Some(tokio::spawn(async move { tui.run().await }))
+    } else {
+        None
+    };
+
     // Per spec: Log startup message with registered hats
     let hat_names: Vec<String> = event_loop.registry().ids().map(|id| id.to_string()).collect();
     info!(
@@ -909,6 +929,13 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool)
         print_termination(reason, state, use_colors);
     };
 
+    // Helper closure to clean up TUI task on exit
+    let cleanup_tui = |tui_handle: Option<tokio::task::JoinHandle<Result<()>>>| {
+        if let Some(handle) = tui_handle {
+            handle.abort();
+        }
+    };
+
     // Main orchestration loop
     loop {
         // Check termination before execution
@@ -917,6 +944,7 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool)
             let terminate_event = event_loop.publish_terminate_event(&reason);
             log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
             handle_termination(&reason, event_loop.state(), config.git_checkpoint, &config.core.scratchpad);
+            cleanup_tui(tui_handle);
             return Ok(reason);
         }
 
@@ -931,6 +959,7 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool)
                 let terminate_event = event_loop.publish_terminate_event(&reason);
                 log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
                 handle_termination(&reason, event_loop.state(), config.git_checkpoint, &config.core.scratchpad);
+                cleanup_tui(tui_handle);
                 return Ok(reason);
             }
         };
@@ -986,6 +1015,7 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool)
             let terminate_event = event_loop.publish_terminate_event(&reason);
             log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
             handle_termination(&reason, event_loop.state(), config.git_checkpoint, &config.core.scratchpad);
+            cleanup_tui(tui_handle);
             return Ok(reason);
         }
 
@@ -1003,6 +1033,7 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool)
             let terminate_event = event_loop.publish_terminate_event(&reason);
             log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
             handle_termination(&reason, event_loop.state(), config.git_checkpoint, &config.core.scratchpad);
+            cleanup_tui(tui_handle);
             return Ok(reason);
         }
     }
