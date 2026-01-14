@@ -1,3 +1,8 @@
+---
+status: implemented
+gap_analysis: 2026-01-13
+---
+
 # Scaffolding Spec
 
 ## Goal

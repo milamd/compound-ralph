@@ -1,3 +1,12 @@
+---
+status: implemented
+gap_analysis: 2026-01-13
+related:
+  - cli-adapters.spec.md
+  - interactive-mode.spec.md
+  - terminal-ui.spec.md
+---
+
 # Event Loop Specification
 
 ## Overview
