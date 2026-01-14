@@ -1,7 +1,7 @@
 # Gap Analysis Results
 
 > Analysis date: 2026-01-14
-> Specs analyzed: 14
+> Specs analyzed: 19
 > Previous analysis: 2026-01-13
 
 ## Summary
@@ -185,6 +185,8 @@ The following specs lack standard YAML frontmatter (status, gap_analysis, relate
 
 ## Verification Summary by Spec
 
+### Core Specs
+
 | Spec | Status | Conformance | Notes |
 |------|--------|-------------|-------|
 | cli-adapters.spec.md | review | **100%** | All acceptance criteria pass ✅ |
@@ -192,14 +194,39 @@ The following specs lack standard YAML frontmatter (status, gap_analysis, relate
 | event-loop.spec.md | approved | **100%** | All acceptance criteria pass ✅ |
 | scaffolding.spec.md | implemented | **100%** | All acceptance criteria pass ✅ |
 | terminal-ui.spec.md | implemented | **98%** | Custom hat emoji/registry minor |
+
+### Adapter Specs
+
+| Spec | Status | Conformance | Notes |
+|------|--------|-------------|-------|
+| adapters/claude.spec.md | review | **100%** | PTY auto-enable, large prompt handling ✅ |
+| adapters/kiro.spec.md | review | **95%** | Flag filtering affects interactive mode |
+| adapters/gemini.spec.md | review | **100%** | Headless operation works ✅ |
+| adapters/codex.spec.md | review | **100%** | Subcommand + full-auto ✅ |
+| adapters/amp.spec.md | review | **100%** | Execute mode + auto-approval ✅ |
+
+### Planning/Draft Specs
+
+| Spec | Status | Conformance | Notes |
+|------|--------|-------------|-------|
 | hat-collections.spec.md | draft | **60%** | 5 validations done, 5 missing |
 | behavioral-verification.spec.md | draft | **15%** | Infrastructure only, catalog not built |
 | test-tools.spec.md | review | **30%** | Infrastructure exists, tools not callable |
-| feature-parity.spec.md | N/A | N/A | Missing frontmatter |
-| v1-v2-feature-parity.spec.md | N/A | **100%** | Checklist complete ✅ |
+
+### Benchmark Specs
+
+| Spec | Status | Conformance | Notes |
+|------|--------|-------------|-------|
 | benchmark-tasks.spec.md | N/A | **95%** | Nearly complete |
 | benchmark-harness.spec.md | N/A | **85%** | Observer wiring needed |
 | benchmark-ux.spec.md | N/A | **80%** | Export formats missing |
+
+### Parity/Distribution Specs
+
+| Spec | Status | Conformance | Notes |
+|------|--------|-------------|-------|
+| feature-parity.spec.md | N/A | N/A | Missing frontmatter |
+| v1-v2-feature-parity.spec.md | N/A | **100%** | Checklist complete ✅ |
 | homebrew-tap.spec.md | N/A | N/A | External distribution |
 
 ---

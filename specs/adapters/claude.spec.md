@@ -1,6 +1,6 @@
 ---
 status: review
-gap_analysis: 2026-01-13
+gap_analysis: 2026-01-14
 last_updated: 2026-01-13
 related:
   - ../cli-adapters.spec.md
