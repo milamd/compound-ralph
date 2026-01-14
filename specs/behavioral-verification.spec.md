@@ -14,6 +14,277 @@ This spec defines a systematic approach to evaluating Ralph Orchestrator's core 
 
 **Goal:** Answer "Does Ralph work correctly?" with automated, deterministic tests.
 
+## The Bootstrapping Problem
+
+**Critical Insight:** We can't test Ralph with Ralph-based tools if Ralph doesn't work.
+
+The verification strategy must be **progressive** - each level assumes only that the previous level passed:
+
+```
+Level 0: Does it compile?           → cargo build
+Level 1: Do units work?             → cargo test (Rust unit tests)
+Level 2: Does the binary run?       → ralph --version
+Level 3: Does it produce output?    → ralph + mock backend
+Level 4: Do events route?           → Verify JSONL session file
+Level 5: Do behaviors work?         → Full behavioral catalog
+Level 6: Is quality acceptable?     → LLM-as-judge (meta preset)
+```
+
+**Each level gates the next.** If Level 2 fails, don't run Level 5.
+
+## Verification Levels
+
+### Level 0: Compilation (No Assumptions)
+
+**Assumes:** Nothing. Source code exists.
+
+```bash
+cargo build --release
+```
+
+| Check | Command | Pass Criteria |
+|-------|---------|---------------|
+| Compiles | `cargo build` | Exit code 0 |
+| No warnings | `cargo build 2>&1 | grep warning` | Empty output |
+| All crates | `cargo build --workspace` | All crates compile |
+
+**If this fails:** Fix compilation errors. Nothing else matters.
+
+---
+
+### Level 1: Unit Tests (Assumes: Compiles)
+
+**Assumes:** Code compiles. Tests individual functions in isolation.
+
+```bash
+cargo test --workspace
+```
+
+These are **Rust unit tests** - no Ralph binary, no LLM, no orchestration:
+
+| Component | Tests | What It Verifies |
+|-----------|-------|------------------|
+| `ralph-proto` | Event, Hat, Topic types | Data structures serialize/deserialize |
+| `ralph-proto` | EventBus | Topic matching, subscription routing |
+| `ralph-proto` | HatRegistry | Hat registration, lookup |
+| `ralph-core` | LoopState | Termination checks, counter logic |
+| `ralph-core` | InstructionBuilder | Prompt construction |
+| `ralph-core` | SessionRecorder | JSONL serialization |
+| `ralph-adapters` | CliBackend | Command construction, prompt modes |
+
+**Example unit test (no Ralph needed):**
+
+```rust
+#[test]
+fn test_topic_matches_glob() {
+    let pattern = Topic::new("build.*");
+    assert!(pattern.matches(&Topic::new("build.task")));
+    assert!(pattern.matches(&Topic::new("build.done")));
+    assert!(!pattern.matches(&Topic::new("task.start")));
+}
+```
+
+**If this fails:** Fix the unit. The component is broken at the function level.
+
+---
+
+### Level 2: Binary Smoke Test (Assumes: Units Pass)
+
+**Assumes:** Components work individually. Tests the compiled binary exists and runs.
+
+```bash
+./target/release/ralph --version
+./target/release/ralph --help
+```
+
+| Check | Command | Pass Criteria |
+|-------|---------|---------------|
+| Binary exists | `test -f ./target/release/ralph` | File exists |
+| Version flag | `ralph --version` | Outputs version, exit 0 |
+| Help flag | `ralph --help` | Outputs help text, exit 0 |
+| Config parsing | `ralph --config test.toml --dry-run` | Parses config, exit 0 |
+
+**If this fails:** Binary linking or CLI parsing is broken.
+
+---
+
+### Level 3: Execution Smoke Test (Assumes: Binary Runs)
+
+**Assumes:** Binary starts. Tests it can execute with a mock backend.
+
+This is the **first test that actually runs Ralph**:
+
+```bash
+# Create minimal mock backend (shell script that echoes)
+cat > /tmp/mock-backend.sh << 'EOF'
+#!/bin/bash
+echo "Mock response: task acknowledged"
+exit 0
+EOF
+chmod +x /tmp/mock-backend.sh
+
+# Run Ralph with mock
+ralph --backend custom \
+      --backend-command "/tmp/mock-backend.sh" \
+      --max-iterations 1 \
+      "Test task"
+```
+
+| Check | Pass Criteria |
+|-------|---------------|
+| Starts without crash | No segfault, no panic |
+| Invokes backend | Mock script executed |
+| Produces session file | `.agent/session.jsonl` created |
+| Exits cleanly | Exit code is defined (0, 1, 2, or 130) |
+
+**If this fails:** Event loop initialization, backend spawning, or signal handling is broken.
+
+---
+
+### Level 4: Event Routing Verification (Assumes: Execution Works)
+
+**Assumes:** Ralph runs and produces output. Tests events are routed correctly.
+
+**Key insight:** We verify by inspecting the session.jsonl file, NOT by trusting Ralph's behavior.
+
+```bash
+# Run Ralph with mock that produces events
+ralph --backend mock \
+      --mock-responses '[{"output": "<event topic=\"build.task\">Do thing</event>"}]' \
+      --max-iterations 1 \
+      "Start task"
+
+# Verify events in session file (using jq, not Ralph)
+jq -r 'select(.event == "bus.publish") | .data.topic' .agent/session.jsonl
+```
+
+| Check | Method | Pass Criteria |
+|-------|--------|---------------|
+| task.start published | `jq` on session.jsonl | Topic "task.start" exists |
+| Routed to planner | `jq` on session.jsonl | `_meta.iteration` shows hat: "planner" |
+| build.task published | `jq` on session.jsonl | Topic "build.task" exists |
+| Events in order | `jq` on session.jsonl | task.start before build.task |
+
+**Verification script (no Ralph-based tools):**
+
+```bash
+#!/bin/bash
+# level4-verify.sh - Verify event routing from session file
+
+SESSION=".agent/session.jsonl"
+
+# Check task.start exists
+if ! jq -e 'select(.event == "bus.publish" and .data.topic == "task.start")' "$SESSION" > /dev/null; then
+    echo "FAIL: task.start not found"
+    exit 1
+fi
+
+# Check build.task exists
+if ! jq -e 'select(.event == "bus.publish" and .data.topic == "build.task")' "$SESSION" > /dev/null; then
+    echo "FAIL: build.task not found"
+    exit 1
+fi
+
+# Check ordering (task.start timestamp < build.task timestamp)
+TASK_START_TS=$(jq -r 'select(.data.topic == "task.start") | .ts' "$SESSION" | head -1)
+BUILD_TASK_TS=$(jq -r 'select(.data.topic == "build.task") | .ts' "$SESSION" | head -1)
+
+if [[ "$TASK_START_TS" > "$BUILD_TASK_TS" ]]; then
+    echo "FAIL: task.start after build.task"
+    exit 1
+fi
+
+echo "PASS: Event routing verified"
+```
+
+**If this fails:** EventBus routing or session recording is broken.
+
+---
+
+### Level 5: Behavioral Verification (Assumes: Events Route)
+
+**Assumes:** Events route correctly. Now we can use the full test-tools suite.
+
+**THIS is where the behavioral catalog applies.**
+
+At this level, we trust:
+- Ralph starts ✓
+- Events are recorded ✓
+- Session files are parseable ✓
+
+So we can use `test_run`, `test_assert`, `test_inspect`:
+
+```bash
+ralph-test verify --catalog ./specs/behavioral-verification.spec.md
+```
+
+See the **Behavioral Test Catalog** section below.
+
+---
+
+### Level 6: Quality Evaluation (Assumes: Behaviors Work)
+
+**Assumes:** Ralph behaves correctly. Evaluates subjective quality.
+
+Uses LLM-as-judge via meta preset:
+
+```bash
+ralph-test evaluate \
+    --criterion plan_quality \
+    --target .agent/scratchpad.md \
+    --judge-preset judge
+```
+
+**This level is optional for correctness** - it evaluates quality, not functionality.
+
+---
+
+## Progressive CI Pipeline
+
+```yaml
+name: Progressive Verification
+
+jobs:
+  level-0-compile:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: cargo build --workspace --release
+
+  level-1-unit:
+    needs: level-0-compile
+    runs-on: ubuntu-latest
+    steps:
+      - run: cargo test --workspace
+
+  level-2-smoke:
+    needs: level-1-unit
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./target/release/ralph --version
+      - run: ./target/release/ralph --help
+
+  level-3-execution:
+    needs: level-2-smoke
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./scripts/level3-smoke.sh
+
+  level-4-routing:
+    needs: level-3-execution
+    runs-on: ubuntu-latest
+    steps:
+      - run: ./scripts/level4-verify.sh
+
+  level-5-behavioral:
+    needs: level-4-routing
+    runs-on: ubuntu-latest
+    steps:
+      - run: ralph-test verify --catalog ./specs/behavioral-verification.spec.md
+```
+
+**Key:** Each job has `needs:` dependency on the previous level. If Level 2 fails, Levels 3-6 don't run.
+
 ## Design Principles
 
 ### 1. Behavior-Driven, Not Implementation-Driven
