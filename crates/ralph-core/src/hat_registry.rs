@@ -8,6 +8,7 @@ use std::collections::HashMap;
 #[derive(Debug, Default)]
 pub struct HatRegistry {
     hats: HashMap<HatId, Hat>,
+    configs: HashMap<HatId, HatConfig>,
 }
 
 impl HatRegistry {
@@ -25,7 +26,7 @@ impl HatRegistry {
 
         for (id, hat_config) in &config.hats {
             let hat = Self::hat_from_config(id, hat_config);
-            registry.register(hat);
+            registry.register_with_config(hat, hat_config.clone());
         }
 
         registry
@@ -45,9 +46,21 @@ impl HatRegistry {
         self.hats.insert(hat.id.clone(), hat);
     }
 
+    /// Registers a hat with its configuration.
+    pub fn register_with_config(&mut self, hat: Hat, config: HatConfig) {
+        let id = hat.id.clone();
+        self.hats.insert(id.clone(), hat);
+        self.configs.insert(id, config);
+    }
+
     /// Gets a hat by ID.
     pub fn get(&self, id: &HatId) -> Option<&Hat> {
         self.hats.get(id)
+    }
+
+    /// Gets a hat's configuration by ID.
+    pub fn get_config(&self, id: &HatId) -> Option<&HatConfig> {
+        self.configs.get(id)
     }
 
     /// Returns all hats in the registry.

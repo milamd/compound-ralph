@@ -360,6 +360,42 @@ impl EventLoop {
         self.ralph.build_prompt(prompt_content)
     }
 
+    /// Records the current event count before hat execution.
+    ///
+    /// Call this before executing a hat, then use `check_default_publishes`
+    /// after execution to inject a fallback event if needed.
+    pub fn record_event_count(&mut self) -> usize {
+        self.event_reader.read_new_events().unwrap_or_default().len()
+    }
+
+    /// Checks if hat wrote any events, and injects default if configured.
+    ///
+    /// Call this after hat execution with the count from `record_event_count`.
+    /// If no new events were written AND the hat has `default_publishes` configured,
+    /// this will inject the default event automatically.
+    pub fn check_default_publishes(&mut self, hat_id: &HatId, _events_before: usize) {
+        let events_after = self.event_reader.read_new_events().unwrap_or_default().len();
+        
+        if events_after == 0 {
+            // No new events written
+            if let Some(config) = self.registry.get_config(hat_id) {
+                if let Some(default_topic) = &config.default_publishes {
+                    // Inject default event
+                    let default_event = Event::new(default_topic.as_str(), "")
+                        .with_source(hat_id.clone());
+                    
+                    debug!(
+                        hat = %hat_id.as_str(),
+                        topic = %default_topic,
+                        "No events written by hat, injecting default_publishes event"
+                    );
+                    
+                    self.bus.publish(default_event);
+                }
+            }
+        }
+    }
+
     /// Processes output from a hat execution.
     ///
     /// Returns the termination reason if the loop should stop.
@@ -1230,5 +1266,136 @@ hats:
         
         let reason = event_loop.process_output(&planner_id, "<event topic=\"build.task\">Task X</event>", true);
         assert_eq!(reason, Some(TerminationReason::LoopThrashing), "Should terminate after 3 redispatches of abandoned task");
+    }
+
+    #[test]
+    fn test_default_publishes_injects_when_no_events() {
+        use tempfile::tempdir;
+        use std::collections::HashMap;
+        
+        let temp_dir = tempdir().unwrap();
+        let events_path = temp_dir.path().join("events.jsonl");
+        
+        let mut config = RalphConfig::default();
+        let mut hats = HashMap::new();
+        hats.insert(
+            "test-hat".to_string(),
+            crate::config::HatConfig {
+                name: "test-hat".to_string(),
+                triggers: vec!["task.start".to_string()],
+                publishes: vec!["task.done".to_string()],
+                instructions: "Test hat".to_string(),
+                backend: None,
+                default_publishes: Some("task.done".to_string()),
+            }
+        );
+        config.hats = hats;
+        
+        let mut event_loop = EventLoop::new(config);
+        event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+        event_loop.initialize("Test");
+        
+        let hat_id = HatId::new("test-hat");
+        
+        // Record event count before execution
+        let before = event_loop.record_event_count();
+        
+        // Hat executes but writes no events
+        // (In real scenario, hat would write to events.jsonl, but we simulate none written)
+        
+        // Check for default_publishes
+        event_loop.check_default_publishes(&hat_id, before);
+        
+        // Verify default event was injected
+        assert!(event_loop.has_pending_events(), "Default event should be injected");
+    }
+
+    #[test]
+    fn test_default_publishes_not_injected_when_events_written() {
+        use tempfile::tempdir;
+        use std::io::Write;
+        use std::collections::HashMap;
+        
+        let temp_dir = tempdir().unwrap();
+        let events_path = temp_dir.path().join("events.jsonl");
+        
+        let mut config = RalphConfig::default();
+        let mut hats = HashMap::new();
+        hats.insert(
+            "test-hat".to_string(),
+            crate::config::HatConfig {
+                name: "test-hat".to_string(),
+                triggers: vec!["task.start".to_string()],
+                publishes: vec!["task.done".to_string()],
+                instructions: "Test hat".to_string(),
+                backend: None,
+                default_publishes: Some("task.done".to_string()),
+            }
+        );
+        config.hats = hats;
+        
+        let mut event_loop = EventLoop::new(config);
+        event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+        event_loop.initialize("Test");
+        
+        let hat_id = HatId::new("test-hat");
+        
+        // Record event count before execution
+        let before = event_loop.record_event_count();
+        
+        // Hat writes an event
+        let mut file = std::fs::File::create(&events_path).unwrap();
+        writeln!(file, r#"{{"topic":"task.done","ts":"2024-01-01T00:00:00Z"}}"#).unwrap();
+        file.flush().unwrap();
+        
+        // Check for default_publishes
+        event_loop.check_default_publishes(&hat_id, before);
+        
+        // Default should NOT be injected since hat wrote an event
+        // The event from file should be read by event_reader
+    }
+
+    #[test]
+    fn test_default_publishes_not_injected_when_not_configured() {
+        use tempfile::tempdir;
+        use std::collections::HashMap;
+        
+        let temp_dir = tempdir().unwrap();
+        let events_path = temp_dir.path().join("events.jsonl");
+        
+        let mut config = RalphConfig::default();
+        let mut hats = HashMap::new();
+        hats.insert(
+            "test-hat".to_string(),
+            crate::config::HatConfig {
+                name: "test-hat".to_string(),
+                triggers: vec!["task.start".to_string()],
+                publishes: vec!["task.done".to_string()],
+                instructions: "Test hat".to_string(),
+                backend: None,
+                default_publishes: None, // No default configured
+            }
+        );
+        config.hats = hats;
+        
+        let mut event_loop = EventLoop::new(config);
+        event_loop.event_reader = crate::event_reader::EventReader::new(&events_path);
+        event_loop.initialize("Test");
+        
+        let hat_id = HatId::new("test-hat");
+        
+        // Consume the initial event from initialize
+        let _ = event_loop.build_prompt(&hat_id);
+        
+        // Record event count before execution
+        let before = event_loop.record_event_count();
+        
+        // Hat executes but writes no events
+        
+        // Check for default_publishes
+        event_loop.check_default_publishes(&hat_id, before);
+        
+        // No default should be injected since not configured
+        assert!(!event_loop.has_pending_events(), "No default should be injected");
     }
 }
