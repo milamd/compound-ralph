@@ -4,7 +4,9 @@
 
 use crate::config::RalphConfig;
 use crate::event_parser::EventParser;
+use crate::event_reader::EventReader;
 use crate::hat_registry::HatRegistry;
+use crate::hatless_ralph::HatlessRalph;
 use crate::instructions::InstructionBuilder;
 use ralph_proto::{Event, EventBus, HatId};
 use std::collections::HashMap;
@@ -135,6 +137,8 @@ pub struct EventLoop {
     bus: EventBus,
     state: LoopState,
     instruction_builder: InstructionBuilder,
+    ralph: HatlessRalph,
+    event_reader: EventReader,
 }
 
 impl EventLoop {
@@ -152,12 +156,22 @@ impl EventLoop {
             bus.register(hat.clone());
         }
 
+        let ralph = HatlessRalph::new(
+            config.event_loop.completion_promise.clone(),
+            config.core.clone(),
+            &registry,
+        );
+
+        let event_reader = EventReader::new(".agent/events.jsonl");
+
         Self {
             config,
             registry,
             bus,
             state: LoopState::new(),
             instruction_builder,
+            ralph,
+            event_reader,
         }
     }
 
@@ -343,7 +357,7 @@ impl EventLoop {
 
     /// Builds the Ralph prompt (build mode).
     pub fn build_ralph_prompt(&self, prompt_content: &str) -> String {
-        self.instruction_builder.build_ralph(prompt_content)
+        self.ralph.build_prompt(prompt_content)
     }
 
     /// Processes output from a hat execution.
@@ -592,6 +606,48 @@ impl EventLoop {
             .any(|line| line.trim_start().starts_with("- [ ]"));
 
         Ok(!has_pending)
+    }
+
+    /// Processes events from JSONL and routes orphaned events to Ralph.
+    ///
+    /// Returns true if Ralph should be invoked to handle orphaned events.
+    pub fn process_events_from_jsonl(&mut self) -> std::io::Result<bool> {
+        let events = self.event_reader.read_new_events()?;
+        
+        if events.is_empty() {
+            return Ok(false);
+        }
+
+        let mut has_orphans = false;
+
+        for event in events {
+            // Check if any hat subscribes to this event
+            if self.registry.has_subscriber(&event.topic) {
+                // Route to subscriber via EventBus
+                let proto_event = if let Some(payload) = event.payload {
+                    Event::new(event.topic.as_str(), &payload)
+                } else {
+                    Event::new(event.topic.as_str(), "")
+                };
+                self.bus.publish(proto_event);
+            } else {
+                // Orphaned event - Ralph will handle it
+                debug!(
+                    topic = %event.topic,
+                    "Event has no subscriber - will be handled by Ralph"
+                );
+                has_orphans = true;
+            }
+        }
+
+        Ok(has_orphans)
+    }
+
+    /// Checks if output contains LOOP_COMPLETE from Ralph.
+    ///
+    /// Only Ralph can trigger loop completion. Hat outputs are ignored.
+    pub fn check_ralph_completion(&self, output: &str) -> bool {
+        EventParser::contains_promise(output, &self.config.event_loop.completion_promise)
     }
 
     /// Publishes the loop.terminate system event to observers.
