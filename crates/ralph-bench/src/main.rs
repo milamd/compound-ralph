@@ -341,6 +341,7 @@ async fn run_task_loop(
     _record_ux: bool,
 ) -> Result<(u32, String)> {
     use ralph_core::{Record, SessionRecorder};
+    use std::sync::Arc;
 
     // Read the prompt file from the workspace (it was copied there during setup)
     let prompt_path = workspace.path().join("PROMPT.md");
@@ -383,19 +384,22 @@ async fn run_task_loop(
     let executor = CliExecutor::new(backend);
 
     // Setup session recording if requested
-    let _recorder: Option<SessionRecorder<BufWriter<File>>> = if let Some(record_path) = _record_path
+    let _recorder: Option<Arc<SessionRecorder<BufWriter<File>>>> = if let Some(record_path) =
+        _record_path
     {
         let file = File::create(record_path)
             .with_context(|| format!("Failed to create recording file: {:?}", record_path))?;
-        let recorder = SessionRecorder::new(BufWriter::new(file));
+        let recorder = Arc::new(SessionRecorder::new(BufWriter::new(file)));
         recorder.record_meta(Record::meta_loop_start(
             &config.event_loop.prompt_file,
             config.event_loop.max_iterations,
             Some("cli"),
         ));
 
-        // TODO: Wire up observer to EventBus for full recording
-        // For now, we just create the recorder but don't use it
+        // Wire observer to EventBus so events are recorded
+        let observer = SessionRecorder::make_observer(Arc::clone(&recorder));
+        event_loop.set_observer(observer);
+
         Some(recorder)
     } else {
         None
