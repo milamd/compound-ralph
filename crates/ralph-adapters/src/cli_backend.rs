@@ -57,12 +57,15 @@ impl CliBackend {
     }
 
     /// Creates the Claude backend.
+    ///
+    /// Uses stdin mode without `-p` flag. This runs Claude in interactive mode
+    /// with full TUI (spinners, tool calls, etc.) visible via PTY.
     pub fn claude() -> Self {
         Self {
             command: "claude".to_string(),
             args: vec!["--dangerously-skip-permissions".to_string()],
-            prompt_mode: PromptMode::Arg,
-            prompt_flag: Some("-p".to_string()),
+            prompt_mode: PromptMode::Stdin,
+            prompt_flag: None,
         }
     }
 
@@ -202,37 +205,22 @@ mod tests {
         let (cmd, args, stdin, _temp) = backend.build_command("test prompt", false);
 
         assert_eq!(cmd, "claude");
-        assert_eq!(
-            args,
-            vec!["--dangerously-skip-permissions", "-p", "test prompt"]
-        );
-        assert!(stdin.is_none());
+        assert_eq!(args, vec!["--dangerously-skip-permissions"]);
+        assert_eq!(stdin, Some("test prompt".to_string()));
     }
 
     #[test]
-    fn test_claude_large_prompt() {
+    fn test_claude_stdin_mode_handles_large_prompts() {
+        // With stdin mode, large prompts are passed directly via stdin
+        // (no temp file needed since we're not using command line args)
         let backend = CliBackend::claude();
         let large_prompt = "x".repeat(7001);
         let (cmd, args, stdin, temp) = backend.build_command(&large_prompt, false);
 
         assert_eq!(cmd, "claude");
-        assert_eq!(args[0], "--dangerously-skip-permissions");
-        assert_eq!(args[1], "-p");
-        assert!(args[2].starts_with("Please read and execute the task in"));
-        assert!(stdin.is_none());
-        assert!(temp.is_some());
-    }
-
-    #[test]
-    fn test_claude_small_prompt() {
-        let backend = CliBackend::claude();
-        let small_prompt = "x".repeat(7000);
-        let (cmd, args, stdin, temp) = backend.build_command(&small_prompt, false);
-
-        assert_eq!(cmd, "claude");
-        assert_eq!(args[2], small_prompt);
-        assert!(stdin.is_none());
-        assert!(temp.is_none());
+        assert_eq!(args, vec!["--dangerously-skip-permissions"]);
+        assert_eq!(stdin, Some(large_prompt));
+        assert!(temp.is_none()); // No temp file needed for stdin mode
     }
 
     #[test]
@@ -292,16 +280,17 @@ mod tests {
 
     #[test]
     fn test_from_config() {
+        // Claude backend uses stdin mode by default
         let config = CliConfig {
             backend: "claude".to_string(),
             command: None,
-            prompt_mode: "arg".to_string(),
+            prompt_mode: "stdin".to_string(),
             ..Default::default()
         };
         let backend = CliBackend::from_config(&config).unwrap();
 
         assert_eq!(backend.command, "claude");
-        assert_eq!(backend.prompt_mode, PromptMode::Arg);
+        assert_eq!(backend.prompt_mode, PromptMode::Stdin);
     }
 
     #[test]
@@ -340,12 +329,15 @@ mod tests {
     #[test]
     fn test_claude_interactive_mode_unchanged() {
         let backend = CliBackend::claude();
-        let (cmd, args_auto, _, _) = backend.build_command("test prompt", false);
-        let (_, args_interactive, _, _) = backend.build_command("test prompt", true);
+        let (cmd, args_auto, stdin_auto, _) = backend.build_command("test prompt", false);
+        let (_, args_interactive, stdin_interactive, _) = backend.build_command("test prompt", true);
 
         assert_eq!(cmd, "claude");
         assert_eq!(args_auto, args_interactive);
-        assert!(args_auto.contains(&"--dangerously-skip-permissions".to_string()));
+        assert_eq!(args_auto, vec!["--dangerously-skip-permissions"]);
+        // Stdin mode is used for both auto and interactive
+        assert_eq!(stdin_auto, Some("test prompt".to_string()));
+        assert_eq!(stdin_interactive, Some("test prompt".to_string()));
     }
 
     #[test]

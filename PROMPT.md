@@ -1,6 +1,9 @@
-Study and implement the ISSUES.md, including the unimplemented specs in priority order.
+Study and implement the new interactive-mode spec, remove any drift from the old previous spec.
 
+## TESTING
 
-SUPER IMPORTANT: Ralph likes to LIE. Validate that the behaviors match what's expected in the acceptance criteria for anything you fix. 
+- Use `insta` to perform e2e integration testing. 
+
+SUPER IMPORTANT: Ralph LIES about completion. Validate that the behaviors match what's expected in the acceptance criteria for anything you fix. 
   
 

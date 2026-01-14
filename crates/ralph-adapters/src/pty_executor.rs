@@ -163,12 +163,15 @@ impl PtyExecutor {
         Self { backend, config }
     }
 
-    /// Spawns Claude in a PTY and returns the PTY pair, child process, and temp file (if any).
+    /// Spawns Claude in a PTY and returns the PTY pair, child process, stdin input, and temp file.
     ///
     /// The temp file is returned to keep it alive for the duration of execution.
     /// For large prompts (>7000 chars), Claude is instructed to read from a temp file.
     /// If the temp file is dropped before Claude reads it, the file is deleted and Claude hangs.
-    fn spawn_pty(&self, prompt: &str) -> io::Result<(PtyPair, Box<dyn portable_pty::Child + Send>, Option<tempfile::NamedTempFile>)> {
+    ///
+    /// The stdin_input is returned so callers can write it to the PTY after taking the writer.
+    /// This is necessary because `take_writer()` can only be called once per PTY.
+    fn spawn_pty(&self, prompt: &str) -> io::Result<(PtyPair, Box<dyn portable_pty::Child + Send>, Option<String>, Option<tempfile::NamedTempFile>)> {
         let pty_system = native_pty_system();
 
         let pair = pty_system
@@ -202,6 +205,7 @@ impl PtyExecutor {
             cols = self.config.cols,
             rows = self.config.rows,
             has_temp_file = temp_file.is_some(),
+            has_stdin_input = stdin_input.is_some(),
             "Spawning process in PTY"
         );
         // Show first 100 chars of each arg to help debug
@@ -217,14 +221,8 @@ impl PtyExecutor {
 
         info!(pid = ?child.process_id(), "Child process spawned");
 
-        // If we need to write to stdin, do it now
-        if let Some(input) = stdin_input {
-            let mut writer = pair.master.take_writer()
-                .map_err(|e| io::Error::other(e.to_string()))?;
-            writer.write_all(input.as_bytes())?;
-        }
-
-        Ok((pair, child, temp_file))
+        // Return stdin_input so callers can write it after taking the writer
+        Ok((pair, child, stdin_input, temp_file))
     }
 
     /// Runs in observe mode (output-only, no input forwarding).
@@ -237,10 +235,22 @@ impl PtyExecutor {
     /// or an I/O error occurs during output handling.
     pub fn run_observe(&self, prompt: &str) -> io::Result<PtyExecutionResult> {
         // Keep temp_file alive for the duration of execution (large prompts use temp files)
-        let (pair, mut child, _temp_file) = self.spawn_pty(prompt)?;
+        let (pair, mut child, stdin_input, _temp_file) = self.spawn_pty(prompt)?;
 
         let mut reader = pair.master.try_clone_reader()
             .map_err(|e| io::Error::other(e.to_string()))?;
+
+        // Write stdin input if present (for stdin prompt mode)
+        if let Some(ref input) = stdin_input {
+            // Small delay to let process initialize
+            std::thread::sleep(Duration::from_millis(100));
+            let mut writer = pair.master.take_writer()
+                .map_err(|e| io::Error::other(e.to_string()))?;
+            writer.write_all(input.as_bytes())?;
+            writer.write_all(b"\n")?;
+            writer.flush()?;
+            info!(input_len = input.len(), "Wrote stdin input to PTY (observe mode)");
+        }
 
         // Drop the slave to signal EOF when master closes
         drop(pair.slave);
@@ -362,7 +372,7 @@ impl PtyExecutor {
     #[allow(clippy::too_many_lines)] // Complex state machine requires cohesive implementation
     pub async fn run_interactive(&self, prompt: &str) -> io::Result<PtyExecutionResult> {
         // Keep temp_file alive for the duration of execution (large prompts use temp files)
-        let (pair, mut child, _temp_file) = self.spawn_pty(prompt)?;
+        let (pair, mut child, stdin_input, _temp_file) = self.spawn_pty(prompt)?;
 
         let reader = pair.master.try_clone_reader()
             .map_err(|e| io::Error::other(e.to_string()))?;
@@ -371,6 +381,9 @@ impl PtyExecutor {
 
         // Drop the slave to signal EOF when master closes
         drop(pair.slave);
+
+        // Store stdin_input for writing after reader thread starts
+        let pending_stdin = stdin_input;
 
         let mut output = Vec::new();
         let timeout_duration = if self.config.idle_timeout_secs > 0 {
@@ -469,6 +482,17 @@ impl PtyExecutor {
                 }
             }
         });
+
+        // Write stdin input after threads are spawned (so we capture any output)
+        // Give Claude's TUI a moment to initialize before sending the prompt
+        if let Some(ref input) = pending_stdin {
+            tokio::time::sleep(Duration::from_millis(100)).await;
+            writer.write_all(input.as_bytes())?;
+            writer.write_all(b"\n")?;
+            writer.flush()?;
+            info!(input_len = input.len(), "Wrote stdin input to PTY");
+            last_activity = Instant::now();
+        }
 
         // Main select loop - this is the key fix for blocking I/O
         // We use tokio::select! to multiplex between output, input, and timeout

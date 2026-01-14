@@ -9,13 +9,15 @@
 
 mod app;
 mod state;
-mod widgets;
+pub mod widgets;
 
 use anyhow::Result;
 use app::App;
 use ralph_proto::Event;
 use state::TuiState;
 use std::sync::{Arc, Mutex};
+
+pub use widgets::terminal::TerminalWidget;
 
 /// Main TUI handle that integrates with the event bus.
 pub struct Tui {
