@@ -12,9 +12,10 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
 use ralph_adapters::{detect_backend, CliBackend, CliExecutor};
 use ralph_core::{
-    CleanupPolicy, EventLoop, PlayerConfig, RalphConfig, ReplayMode, SessionPlayer, TaskSuite,
-    TerminationReason, WorkspaceManager,
+    CleanupPolicy, CliCapture, EventLoop, PlayerConfig, RalphConfig, ReplayMode, SessionPlayer,
+    TaskSuite, TerminationReason, WorkspaceManager,
 };
+use ralph_proto::FrameCapture;
 use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter};
 use std::path::PathBuf;
@@ -337,8 +338,8 @@ async fn cmd_run(
 async fn run_task_loop(
     task: &ralph_core::TaskDefinition,
     workspace: &ralph_core::TaskWorkspace,
-    _record_path: Option<&PathBuf>,
-    _record_ux: bool,
+    record_path: Option<&PathBuf>,
+    record_ux: bool,
 ) -> Result<(u32, String)> {
     use ralph_core::{Record, SessionRecorder};
     use std::sync::Arc;
@@ -382,8 +383,8 @@ async fn run_task_loop(
     let executor = CliExecutor::new(backend);
 
     // Setup session recording if requested
-    let _recorder: Option<Arc<SessionRecorder<BufWriter<File>>>> = if let Some(record_path) =
-        _record_path
+    let recorder: Option<Arc<SessionRecorder<BufWriter<File>>>> = if let Some(record_path) =
+        record_path
     {
         let file = File::create(record_path)
             .with_context(|| format!("Failed to create recording file: {:?}", record_path))?;
@@ -402,6 +403,9 @@ async fn run_task_loop(
     } else {
         None
     };
+
+    // Determine if we should capture UX events (requires both flag and recorder)
+    let should_capture_ux = record_ux && recorder.is_some();
 
     info!(
         "Running task '{}' with max {} iterations",
@@ -471,8 +475,24 @@ async fn run_task_loop(
         let timeout_secs = config.adapter_settings(&config.cli.backend).timeout;
         let timeout = Some(Duration::from_secs(timeout_secs));
 
-        let mut output_buf = Vec::new();
-        let result = executor.execute(&prompt, &mut output_buf, timeout).await?;
+        // Execute with optional UX capture
+        let result = if should_capture_ux {
+            // Wrap output buffer with CliCapture to record terminal output
+            let mut output_buf = Vec::new();
+            let mut capture = CliCapture::new(&mut output_buf, true);
+            let result = executor.execute(&prompt, &mut capture, timeout).await?;
+
+            // Extract and record UX events
+            let ux_events = capture.take_captures();
+            if let Some(ref rec) = recorder {
+                rec.record_ux_events(&ux_events);
+            }
+
+            result
+        } else {
+            let mut output_buf = Vec::new();
+            executor.execute(&prompt, &mut output_buf, timeout).await?
+        };
 
         // Process output
         if let Some(reason) = event_loop.process_output(&hat_id, &result.output, result.success) {
