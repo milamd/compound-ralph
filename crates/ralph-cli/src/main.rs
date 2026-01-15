@@ -18,11 +18,11 @@ use ralph_adapters::{detect_backend, CliBackend, CliExecutor, ConsoleStreamHandl
 use ralph_core::{EventHistory, EventLogger, EventLoop, EventParser, EventRecord, RalphConfig, Record, SessionRecorder, SummaryWriter, TerminationReason};
 use ralph_proto::{Event, HatId};
 use ralph_tui::Tui;
-use std::fs::File;
+use std::fs::{self, File};
 use std::io::{stdout, BufWriter, IsTerminal};
-use std::sync::Arc;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
+use std::sync::Arc;
 use std::time::Duration;
 use tracing::{debug, error, info, warn};
 
@@ -205,6 +205,9 @@ enum Commands {
 
     /// Initialize a new ralph.yml configuration file
     Init(InitArgs),
+
+    /// Clean up Ralph artifacts (.agent/ directory)
+    Clean(CleanArgs),
 }
 
 /// Arguments for the init subcommand.
@@ -359,6 +362,14 @@ struct EventsArgs {
     clear: bool,
 }
 
+/// Arguments for the clean subcommand.
+#[derive(Parser, Debug)]
+struct CleanArgs {
+    /// Preview what would be deleted without actually deleting
+    #[arg(long)]
+    dry_run: bool,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install panic hook to restore terminal state on crash
@@ -378,6 +389,7 @@ async fn main() -> Result<()> {
         Some(Commands::Resume(args)) => resume_command(cli.config, cli.verbose, cli.color, args).await,
         Some(Commands::Events(args)) => events_command(cli.color, args),
         Some(Commands::Init(args)) => init_command(cli.color, args),
+        Some(Commands::Clean(args)) => clean_command(cli.config, cli.color, args),
         None => {
             // Default to run with no overrides (backwards compatibility)
             let args = RunArgs {
@@ -773,6 +785,126 @@ fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
     Ok(())
 }
 
+fn clean_command(config_path: PathBuf, color_mode: ColorMode, args: CleanArgs) -> Result<()> {
+    let use_colors = color_mode.should_use_colors();
+
+    // Load configuration
+    let config = if config_path.exists() {
+        RalphConfig::from_file(&config_path)
+            .with_context(|| format!("Failed to load config from {:?}", config_path))?
+    } else {
+        warn!("Config file {:?} not found, using defaults", config_path);
+        RalphConfig::default()
+    };
+
+    // Extract the .agent directory path from scratchpad path
+    let scratchpad_path = Path::new(&config.core.scratchpad);
+    let agent_dir = scratchpad_path.parent().ok_or_else(|| {
+        anyhow::anyhow!(
+            "Could not determine parent directory from scratchpad path: {}",
+            config.core.scratchpad
+        )
+    })?;
+
+    // Check if directory exists
+    if !agent_dir.exists() {
+        // Not an error - just inform user
+        if use_colors {
+            println!(
+                "{}Nothing to clean:{} Directory '{}' does not exist",
+                colors::DIM,
+                colors::RESET,
+                agent_dir.display()
+            );
+        } else {
+            println!("Nothing to clean: Directory '{}' does not exist", agent_dir.display());
+        }
+        return Ok(());
+    }
+
+    // Dry run mode - list what would be deleted
+    if args.dry_run {
+        if use_colors {
+            println!(
+                "{}Dry run mode:{} Would delete directory and all contents:",
+                colors::CYAN,
+                colors::RESET
+            );
+        } else {
+            println!("Dry run mode: Would delete directory and all contents:");
+        }
+        println!("  {}", agent_dir.display());
+
+        // List directory contents
+        list_directory_contents(agent_dir, use_colors, 1)?;
+
+        return Ok(());
+    }
+
+    // Perform actual deletion
+    fs::remove_dir_all(agent_dir).with_context(|| {
+        format!(
+            "Failed to delete directory '{}'. Check permissions and try again.",
+            agent_dir.display()
+        )
+    })?;
+
+    // Success message
+    if use_colors {
+        println!(
+            "{}✓{} Cleaned: Deleted '{}' and all contents",
+            colors::GREEN,
+            colors::RESET,
+            agent_dir.display()
+        );
+    } else {
+        println!("Cleaned: Deleted '{}' and all contents", agent_dir.display());
+    }
+
+    Ok(())
+}
+
+/// Lists directory contents recursively for dry-run mode.
+fn list_directory_contents(path: &Path, use_colors: bool, indent: usize) -> Result<()> {
+    let entries = fs::read_dir(path)?;
+    let indent_str = "  ".repeat(indent);
+
+    for entry in entries {
+        let entry = entry?;
+        let entry_path = entry.path();
+        let file_name = entry.file_name();
+
+        if entry_path.is_dir() {
+            if use_colors {
+                println!(
+                    "{}{}{}/{}",
+                    indent_str,
+                    colors::BLUE,
+                    file_name.to_string_lossy(),
+                    colors::RESET
+                );
+            } else {
+                println!("{}{}/", indent_str, file_name.to_string_lossy());
+            }
+            list_directory_contents(&entry_path, use_colors, indent + 1)?;
+        } else {
+            if use_colors {
+                println!(
+                    "{}{}{}{}",
+                    indent_str,
+                    colors::DIM,
+                    file_name.to_string_lossy(),
+                    colors::RESET
+                );
+            } else {
+                println!("{}{}", indent_str, file_name.to_string_lossy());
+            }
+        }
+    }
+
+    Ok(())
+}
+
 fn print_events_table(records: &[ralph_core::EventRecord], use_colors: bool) {
     use colors::*;
 
@@ -947,6 +1079,31 @@ fn truncate(s: &str, max_len: usize) -> String {
     } else {
         format!("{}…", &s[..max_len - 1])
     }
+}
+
+/// Builds a map of event topics to hat display information for the TUI.
+///
+/// This allows the TUI to dynamically resolve which hat should be displayed
+/// for any event topic, including custom hats (e.g., "review.security" → "🔒 Security Reviewer").
+///
+/// Only exact topic patterns (non-wildcard) are included to avoid pattern matching complexity.
+fn build_tui_hat_map(registry: &ralph_core::HatRegistry) -> std::collections::HashMap<String, (HatId, String)> {
+    use std::collections::HashMap;
+
+    let mut map = HashMap::new();
+
+    for hat in registry.all() {
+        // For each subscription topic, add exact matches to the map
+        for subscription in &hat.subscriptions {
+            let topic_str = subscription.to_string();
+            // Only add non-wildcard topics
+            if !topic_str.contains('*') {
+                map.insert(topic_str, (hat.id.clone(), hat.name.clone()));
+            }
+        }
+    }
+
+    map
 }
 
 /// Resolves prompt content with proper precedence.
@@ -1179,7 +1336,7 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
     let enable_tui = enable_tui && user_interactive && pty_executor.is_some();
     let tui_handle = if enable_tui {
         let mut tui = Tui::new();
-        
+
         // Parse and apply TUI prefix key configuration
         match config.tui.parse_prefix() {
             Ok((key_code, key_modifiers)) => {
@@ -1190,13 +1347,19 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
                 return Err(anyhow::anyhow!("Invalid TUI prefix_key: {}", e));
             }
         }
-        
+
+        // Build hat map for dynamic topic-to-hat resolution
+        // This allows TUI to display custom hats (e.g., "🔒 Security Reviewer")
+        // instead of generic "ralph" for all events
+        let hat_map = build_tui_hat_map(event_loop.registry());
+        tui = tui.with_hat_map(hat_map);
+
         // Wire PTY handle to TUI
         if let Some(ref mut executor) = pty_executor {
             let pty_handle = executor.handle();
             tui = tui.with_pty(pty_handle);
         }
-        
+
         let observer = tui.observer();
         event_loop.add_observer(observer);
         Some(tokio::spawn(async move { tui.run().await }))
@@ -1851,5 +2014,109 @@ mod tests {
             Some(TerminationReason::Interrupted),
             "ForceKill should terminate in autonomous mode"
         );
+    }
+
+    #[test]
+    fn test_build_tui_hat_map_extracts_custom_hats() {
+        // Given: A config with custom hats from pr-review preset
+        let yaml = r#"
+hats:
+  security_reviewer:
+    name: "🔒 Security Reviewer"
+    triggers: ["review.security"]
+    publishes: ["security.done"]
+  correctness_reviewer:
+    name: "🎯 Correctness Reviewer"
+    triggers: ["review.correctness"]
+    publishes: ["correctness.done"]
+  architecture_reviewer:
+    name: "🏗️ Architecture Reviewer"
+    triggers: ["review.architecture", "arch.*"]
+    publishes: ["architecture.done"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = ralph_core::HatRegistry::from_config(&config);
+
+        // When: Building the TUI hat map
+        let hat_map = build_tui_hat_map(&registry);
+
+        // Then: Exact topic patterns should be mapped
+        assert_eq!(hat_map.len(), 3, "Should have 3 exact topic mappings");
+
+        // Security reviewer
+        assert!(
+            hat_map.contains_key("review.security"),
+            "Should map review.security topic"
+        );
+        let (hat_id, hat_display) = &hat_map["review.security"];
+        assert_eq!(hat_id.as_str(), "security_reviewer");
+        assert_eq!(hat_display, "🔒 Security Reviewer");
+
+        // Correctness reviewer
+        assert!(
+            hat_map.contains_key("review.correctness"),
+            "Should map review.correctness topic"
+        );
+        let (hat_id, hat_display) = &hat_map["review.correctness"];
+        assert_eq!(hat_id.as_str(), "correctness_reviewer");
+        assert_eq!(hat_display, "🎯 Correctness Reviewer");
+
+        // Architecture reviewer - exact topic only
+        assert!(
+            hat_map.contains_key("review.architecture"),
+            "Should map review.architecture topic"
+        );
+        let (hat_id, hat_display) = &hat_map["review.architecture"];
+        assert_eq!(hat_id.as_str(), "architecture_reviewer");
+        assert_eq!(hat_display, "🏗️ Architecture Reviewer");
+
+        // Wildcard patterns should be skipped
+        assert!(
+            !hat_map.contains_key("arch.*"),
+            "Wildcard patterns should not be in the map"
+        );
+    }
+
+    #[test]
+    fn test_build_tui_hat_map_empty_registry() {
+        // Given: An empty registry (solo mode)
+        let config = RalphConfig::default();
+        let registry = ralph_core::HatRegistry::from_config(&config);
+
+        // When: Building the TUI hat map
+        let hat_map = build_tui_hat_map(&registry);
+
+        // Then: Map should be empty
+        assert_eq!(
+            hat_map.len(),
+            0,
+            "Empty registry should produce empty hat map"
+        );
+    }
+
+    #[test]
+    fn test_build_tui_hat_map_skips_wildcard_patterns() {
+        // Given: A config with only wildcard patterns
+        let yaml = r#"
+hats:
+  planner:
+    name: "📋 Planner"
+    triggers: ["task.*", "build.*"]
+    publishes: ["build.task"]
+"#;
+        let config: RalphConfig = serde_yaml::from_str(yaml).unwrap();
+        let registry = ralph_core::HatRegistry::from_config(&config);
+
+        // When: Building the TUI hat map
+        let hat_map = build_tui_hat_map(&registry);
+
+        // Then: No mappings should be created (all wildcards skipped)
+        assert_eq!(
+            hat_map.len(),
+            0,
+            "Wildcard-only subscriptions should produce empty map"
+        );
+        assert!(!hat_map.contains_key("task.*"));
+        assert!(!hat_map.contains_key("build.*"));
     }
 }
