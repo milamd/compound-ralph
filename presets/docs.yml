@@ -20,12 +20,11 @@ core:
   specs_dir: "./specs/"
 
 hats:
-hats:
   writer:
     name: "Writer"
     triggers: ["write.section"]
     publishes: ["write.done"]
-    default_publishes: ["write.done"]
+    default_publishes: "write.done"
     instructions: |
       ## WRITER MODE
 
@@ -62,7 +61,7 @@ hats:
     name: "Doc Reviewer"
     triggers: ["write.done"]
     publishes: ["review.done", "review.revision"]
-    default_publishes: ["review.done"]
+    default_publishes: "review.done"
     instructions: |
       ## DOC REVIEWER MODE
 

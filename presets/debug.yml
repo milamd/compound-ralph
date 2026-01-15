@@ -11,6 +11,7 @@ event_loop:
   completion_promise: "DEBUG_COMPLETE"
   max_iterations: 30
   max_runtime_seconds: 7200
+  starting_event: "debug.start"  # Ralph publishes this after coordination
 
 cli:
   backend: "claude"
@@ -22,7 +23,7 @@ core:
 hats:
   investigator:
     name: "Investigator"
-    triggers: ["task.start", "task.resume", "hypothesis.rejected", "fix.verified"]
+    triggers: ["debug.start", "hypothesis.rejected", "hypothesis.confirmed", "fix.verified"]
     publishes: ["hypothesis.test", "fix.propose"]
     instructions: |
       ## INVESTIGATOR MODE
@@ -99,7 +100,7 @@ hats:
 
   fixer:
     name: "Bug Fixer"
-    triggers: ["fix.propose"]
+    triggers: ["fix.propose", "fix.failed"]
     publishes: ["fix.applied", "fix.blocked"]
     instructions: |
       ## BUG FIXER MODE
