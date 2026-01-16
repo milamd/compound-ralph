@@ -85,46 +85,72 @@ impl CliExecutor {
             }
         }
 
-        let mut accumulated_output = String::new();
         let mut timed_out = false;
 
+        // Take both stdout and stderr handles upfront to read concurrently
+        // This prevents deadlock when stderr fills its buffer before stdout produces output
+        let stdout_handle = child.stdout.take();
+        let stderr_handle = child.stderr.take();
+
         // Wrap the streaming in a timeout if configured
+        // Read stdout and stderr CONCURRENTLY to avoid pipe buffer deadlock
         let stream_result = async {
-            // Stream stdout
-            if let Some(stdout) = child.stdout.take() {
-                let reader = BufReader::new(stdout);
-                let mut lines = reader.lines();
-
-                while let Some(line) = lines.next_line().await? {
-                    // Write to output writer (real-time streaming)
-                    writeln!(output_writer, "{line}")?;
-                    output_writer.flush()?;
-
-                    // Accumulate for return value
-                    accumulated_output.push_str(&line);
-                    accumulated_output.push('\n');
+            // Create futures for reading both streams
+            let stdout_future = async {
+                let mut lines_out = Vec::new();
+                if let Some(stdout) = stdout_handle {
+                    let reader = BufReader::new(stdout);
+                    let mut lines = reader.lines();
+                    while let Some(line) = lines.next_line().await? {
+                        lines_out.push(line);
+                    }
                 }
+                Ok::<_, std::io::Error>(lines_out)
+            };
+
+            let stderr_future = async {
+                let mut lines_out = Vec::new();
+                if let Some(stderr) = stderr_handle {
+                    let reader = BufReader::new(stderr);
+                    let mut lines = reader.lines();
+                    while let Some(line) = lines.next_line().await? {
+                        lines_out.push(line);
+                    }
+                }
+                Ok::<_, std::io::Error>(lines_out)
+            };
+
+            // Read both streams concurrently to prevent deadlock
+            let (stdout_lines, stderr_lines) = tokio::try_join!(stdout_future, stderr_future)?;
+
+            // Write stdout lines first (main output)
+            for line in &stdout_lines {
+                writeln!(output_writer, "{line}")?;
             }
 
-            // Also capture stderr (append to output)
-            if let Some(stderr) = child.stderr.take() {
-                let reader = BufReader::new(stderr);
-                let mut lines = reader.lines();
-
-                while let Some(line) = lines.next_line().await? {
-                    writeln!(output_writer, "[stderr] {line}")?;
-                    output_writer.flush()?;
-
-                    accumulated_output.push_str("[stderr] ");
-                    accumulated_output.push_str(&line);
-                    accumulated_output.push('\n');
-                }
+            // Write stderr lines (prefixed)
+            for line in &stderr_lines {
+                writeln!(output_writer, "[stderr] {line}")?;
             }
 
-            Ok::<_, std::io::Error>(())
+            output_writer.flush()?;
+
+            // Build accumulated output (stdout first, then stderr)
+            let mut accumulated = String::new();
+            for line in stdout_lines {
+                accumulated.push_str(&line);
+                accumulated.push('\n');
+            }
+            for line in stderr_lines {
+                accumulated.push_str("[stderr] ");
+                accumulated.push_str(&line);
+                accumulated.push('\n');
+            }
+
+            Ok::<_, std::io::Error>(accumulated)
         };
 
-        match timeout {
+        let accumulated_output = match timeout {
             Some(duration) => {
                 debug!(timeout_secs = duration.as_secs(), "Executing with timeout");
                 match tokio::time::timeout(duration, stream_result).await {
@@ -137,13 +163,14 @@ impl CliExecutor {
                         );
                         timed_out = true;
                         Self::terminate_child(&mut child)?;
+                        String::new() // Return empty output on timeout
                     }
                 }
             }
             None => {
-                stream_result.await?;
+                stream_result.await?
             }
-        }
+        };
 
         let status = child.wait().await?;
 

@@ -227,22 +227,46 @@ echo ""
 if [[ -f "$LOG_DIR/session.jsonl" ]]; then
     echo -e "${BLUE}Extracting metrics...${NC}"
 
-    # Count iterations
-    ITERATIONS=$(grep -c '"type":"iteration_start"' "$LOG_DIR/session.jsonl" 2>/dev/null || echo "0")
+    # Count iterations from output.log (ITERATION markers are more reliable than session.jsonl)
+    if [[ -f "$LOG_DIR/output.log" ]]; then
+        ITERATIONS=$(grep -c '^ ITERATION [0-9]\+ │' "$LOG_DIR/output.log" 2>/dev/null || true)
+        if [[ -z "$ITERATIONS" ]]; then
+            ITERATIONS="0"
+        fi
+    else
+        ITERATIONS="0"
+    fi
 
-    # Count unique hats
-    HATS=$(grep '"type":"hat_activated"' "$LOG_DIR/session.jsonl" 2>/dev/null | \
-           jq -r '.hat_id' 2>/dev/null | sort -u | tr '\n' ',' | sed 's/,$//' || echo "unknown")
+    # Extract unique hats from output.log iteration markers
+    # Pattern: " ITERATION N │ 🎭 hat_name │ ..."
+    # We extract the part between the emoji and the next │
+    if [[ -f "$LOG_DIR/output.log" ]]; then
+        HATS=$(grep '^ ITERATION [0-9]\+ │' "$LOG_DIR/output.log" 2>/dev/null | \
+               sed -E 's/.* │ [^[:alnum:]]+ ([a-z_]+) │.*/\1/' | \
+               sort -u | tr '\n' ',' | sed 's/,$//' || true)
+        # Handle empty result
+        if [[ -z "$HATS" ]]; then
+            HATS="unknown"
+        fi
+    else
+        HATS="unknown"
+    fi
 
-    # Count events
-    EVENTS=$(grep -c '"type":"event_published"' "$LOG_DIR/session.jsonl" 2>/dev/null || echo "0")
+    # Count events published via bus.publish
+    EVENTS=$(grep -c '"event":"bus.publish"' "$LOG_DIR/session.jsonl" 2>/dev/null || true)
+    if [[ -z "$EVENTS" ]]; then
+        EVENTS="0"
+    fi
 
-    # Check completion
-    if grep -q 'LOOP_COMPLETE\|EVALUATION_COMPLETE' "$LOG_DIR/output.log" 2>/dev/null; then
+    # Check completion by looking for loop.terminate event
+    if grep -q '"topic":"loop.terminate"' "$LOG_DIR/session.jsonl" 2>/dev/null; then
         COMPLETED="true"
     else
         COMPLETED="false"
     fi
+
+    # Escape any quotes in HATS for JSON validity
+    HATS_ESCAPED=$(echo "$HATS" | sed 's/"/\\"/g')
 
     cat > "$LOG_DIR/metrics.json" << EOF
 {
@@ -252,7 +276,7 @@ if [[ -f "$LOG_DIR/session.jsonl" ]]; then
   "exit_code": $EXIT_CODE,
   "iterations": $ITERATIONS,
   "events_published": $EVENTS,
-  "hats_activated": "$HATS",
+  "hats_activated": "$HATS_ESCAPED",
   "completed": $COMPLETED,
   "timestamp": "$TIMESTAMP"
 }

@@ -238,11 +238,11 @@ struct InitArgs {
 /// Arguments for the run subcommand.
 #[derive(Parser, Debug)]
 struct RunArgs {
-    /// Inline prompt text (mutually exclusive with -P)
-    #[arg(short = 'p', long = "prompt-text", conflicts_with = "prompt_file")]
+    /// Inline prompt text (mutually exclusive with -P/--prompt-file)
+    #[arg(short = 'p', long = "prompt", conflicts_with = "prompt_file")]
     prompt_text: Option<String>,
 
-    /// Prompt file path (mutually exclusive with -p)
+    /// Prompt file path (mutually exclusive with -p/--prompt)
     #[arg(short = 'P', long = "prompt-file", conflicts_with = "prompt_text")]
     prompt_file: Option<PathBuf>,
 
