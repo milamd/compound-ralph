@@ -20,7 +20,7 @@ use std::fs::{self, File};
 use std::io::{self, BufReader, BufWriter};
 use std::path::PathBuf;
 use std::time::Duration;
-use tracing::{info, warn};
+use tracing::{debug, info, warn};
 
 /// Ralph Benchmark Harness - Record, replay, and benchmark orchestration loops
 #[derive(Parser, Debug)]
@@ -503,7 +503,7 @@ async fn run_task_loop(
         // Precheck validation: Warn if no pending events after processing output
         if !event_loop.has_pending_events() {
             let expected = event_loop.get_hat_publishes(&hat_id);
-            warn!(
+            debug!(
                 hat = %hat_id.as_str(),
                 expected_topics = ?expected,
                 "No pending events after iteration. Agent may have failed to publish a valid event."

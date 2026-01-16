@@ -1696,7 +1696,7 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
         // if the LLM failed to publish an event."
         if !event_loop.has_pending_events() {
             let expected = event_loop.get_hat_publishes(&hat_id);
-            warn!(
+            debug!(
                 hat = %hat_id.as_str(),
                 expected_topics = ?expected,
                 "No pending events after iteration. Agent may have failed to publish a valid event. \

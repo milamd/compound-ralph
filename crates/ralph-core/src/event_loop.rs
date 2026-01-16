@@ -369,14 +369,14 @@ impl EventLoop {
         // This preserves hat context instead of always falling back to Ralph
         let fallback_event = match &self.state.last_hat {
             Some(hat_id) if hat_id.as_str() != "ralph" => {
-                info!(
+                debug!(
                     hat = %hat_id.as_str(),
                     "Injecting fallback event to recover - targeting last hat with task.resume"
                 );
                 fallback_event.with_target(hat_id.clone())
             }
             _ => {
-                info!("Injecting fallback event to recover - triggering Ralph with task.resume");
+                debug!("Injecting fallback event to recover - triggering Ralph with task.resume");
                 fallback_event
             }
         };
@@ -589,14 +589,14 @@ impl EventLoop {
                 }
                 Ok(false) => {
                     // Pending tasks exist - reject completion
-                    warn!(
+                    debug!(
                         "Completion promise detected but scratchpad has pending [ ] tasks - rejected"
                     );
                     self.state.completion_confirmations = 0;
                 }
                 Err(e) => {
                     // Scratchpad doesn't exist or can't be read - reject completion
-                    warn!(
+                    debug!(
                         error = %e,
                         "Completion promise detected but scratchpad verification failed - rejected"
                     );
