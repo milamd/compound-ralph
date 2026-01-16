@@ -475,3 +475,7 @@ MIT License — See [LICENSE](LICENSE) for details.
 ---
 
 *"I'm learnding!" - Ralph Wiggum*
+
+---
+
+[![Star History Chart](https://api.star-history.com/svg?repos=mikeyobrien/ralph-orchestrator&type=date&legend=top-left)](https://www.star-history.com/#mikeyobrien/ralph-orchestrator&type=date&legend=top-left)
