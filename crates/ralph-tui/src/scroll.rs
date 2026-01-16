@@ -14,7 +14,7 @@ pub enum SearchDirection {
 pub struct SearchState {
     pub query: String,
     pub direction: SearchDirection,
-    pub matches: Vec<usize>, // Line numbers with matches
+    pub matches: Vec<usize>,  // Line numbers with matches
     pub current_match: usize, // Index into matches vec
 }
 
@@ -139,36 +139,38 @@ impl ScrollManager {
 
     /// Jumps to next match.
     pub fn next_match(&mut self) {
-        if let Some(ref mut search) = self.search {
-            if !search.matches.is_empty() {
-                search.current_match = (search.current_match + 1) % search.matches.len();
-                let line = search.matches[search.current_match];
-                let _ = search; // End the mutable borrow
-                self.jump_to_line(line);
-            }
+        if let Some(ref mut search) = self.search
+            && !search.matches.is_empty()
+        {
+            search.current_match = (search.current_match + 1) % search.matches.len();
+            let line = search.matches[search.current_match];
+            let _ = search; // End the mutable borrow
+            self.jump_to_line(line);
         }
     }
 
     /// Jumps to previous match.
     pub fn prev_match(&mut self) {
-        if let Some(ref mut search) = self.search {
-            if !search.matches.is_empty() {
-                search.current_match = if search.current_match == 0 {
-                    search.matches.len() - 1
-                } else {
-                    search.current_match - 1
-                };
-                let line = search.matches[search.current_match];
-                let _ = search; // End the mutable borrow
-                self.jump_to_line(line);
-            }
+        if let Some(ref mut search) = self.search
+            && !search.matches.is_empty()
+        {
+            search.current_match = if search.current_match == 0 {
+                search.matches.len() - 1
+            } else {
+                search.current_match - 1
+            };
+            let line = search.matches[search.current_match];
+            let _ = search; // End the mutable borrow
+            self.jump_to_line(line);
         }
     }
 
     /// Jumps to a specific line number.
     fn jump_to_line(&mut self, line: usize) {
         // Calculate offset to center the line in viewport
-        let target_offset = self.total_lines.saturating_sub(line + self.viewport_height / 2);
+        let target_offset = self
+            .total_lines
+            .saturating_sub(line + self.viewport_height / 2);
         self.offset = target_offset.min(self.max_offset());
     }
 
@@ -362,7 +364,11 @@ mod tests {
         let mut sm = ScrollManager::new();
         sm.update_dimensions(100, 24);
         let lines = vec!["hello".to_string(), "world".to_string()];
-        sm.start_search("notfound".to_string(), super::SearchDirection::Forward, &lines);
+        sm.start_search(
+            "notfound".to_string(),
+            super::SearchDirection::Forward,
+            &lines,
+        );
         let search = sm.search_state().unwrap();
         assert_eq!(search.matches.len(), 0);
     }

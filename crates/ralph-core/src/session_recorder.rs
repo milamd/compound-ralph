@@ -153,10 +153,10 @@ impl<W: Write> SessionRecorder<W> {
 
     /// Records a UX event.
     pub fn record_ux_event(&self, ux_event: &UxEvent) {
-        if matches!(ux_event, UxEvent::TerminalWrite(_)) {
-            if let Ok(mut count) = self.ux_write_count.lock() {
-                *count += 1;
-            }
+        if matches!(ux_event, UxEvent::TerminalWrite(_))
+            && let Ok(mut count) = self.ux_write_count.lock()
+        {
+            *count += 1;
         }
         let record = Record::from_ux_event(ux_event);
         self.write_record(&record);
@@ -196,9 +196,10 @@ impl<W: Write> SessionRecorder<W> {
 
     /// Flushes the underlying writer.
     pub fn flush(&self) -> io::Result<()> {
-        self.writer.lock().map_err(|_| {
-            io::Error::new(io::ErrorKind::Other, "Failed to acquire writer lock")
-        })?.flush()
+        self.writer
+            .lock()
+            .map_err(|_| io::Error::new(io::ErrorKind::Other, "Failed to acquire writer lock"))?
+            .flush()
     }
 }
 
@@ -215,9 +216,7 @@ impl<W: Write + Send + 'static> SessionRecorder<W> {
     /// let observer = SessionRecorder::make_observer(Arc::clone(&recorder));
     /// event_bus.set_observer(observer);
     /// ```
-    pub fn make_observer(
-        recorder: std::sync::Arc<Self>,
-    ) -> impl Fn(&Event) + Send + 'static {
+    pub fn make_observer(recorder: std::sync::Arc<Self>) -> impl Fn(&Event) + Send + 'static {
         move |event| {
             recorder.record_bus_event(event);
         }

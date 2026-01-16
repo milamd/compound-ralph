@@ -8,18 +8,26 @@
 //! - Entry point to the headless orchestration loop
 //! - Event history viewing via `ralph events`
 //! - Project initialization via `ralph init`
+//! - SOP-based planning via `ralph plan` and `ralph task`
 
 mod init;
 mod presets;
+mod sop_runner;
 
 use anyhow::{Context, Result};
 use clap::{Parser, Subcommand, ValueEnum};
-use ralph_adapters::{detect_backend, CliBackend, CliExecutor, ConsoleStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler};
-use ralph_core::{EventHistory, EventLogger, EventLoop, EventParser, EventRecord, RalphConfig, Record, SessionRecorder, SummaryWriter, TerminationReason};
+use ralph_adapters::{
+    CliBackend, CliExecutor, ConsoleStreamHandler, PtyConfig, PtyExecutor, QuietStreamHandler,
+    detect_backend,
+};
+use ralph_core::{
+    EventHistory, EventLogger, EventLoop, EventParser, EventRecord, RalphConfig, Record,
+    SessionRecorder, SummaryWriter, TerminationReason,
+};
 use ralph_proto::{Event, HatId};
 use ralph_tui::Tui;
 use std::fs::{self, File};
-use std::io::{stdout, BufWriter, IsTerminal, Write};
+use std::io::{BufWriter, IsTerminal, Write, stdout};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -29,7 +37,7 @@ use tracing::{debug, error, info, warn};
 // Unix-specific process management for process group leadership
 #[cfg(unix)]
 mod process_management {
-    use nix::unistd::{setpgid, Pid};
+    use nix::unistd::{Pid, setpgid};
     use tracing::debug;
 
     /// Sets up process group leadership.
@@ -44,7 +52,10 @@ mod process_management {
         if let Err(e) = setpgid(pid, pid) {
             // EPERM is OK - we're already a process group leader (e.g., started from shell)
             if e != nix::errno::Errno::EPERM {
-                debug!("Note: Could not set process group ({}), continuing anyway", e);
+                debug!(
+                    "Note: Could not set process group ({}), continuing anyway",
+                    e
+                );
             }
         }
         debug!("Process group initialized: PID {}", pid);
@@ -178,7 +189,6 @@ struct Cli {
     // ─────────────────────────────────────────────────────────────────────────
     // Global options (available for all subcommands)
     // ─────────────────────────────────────────────────────────────────────────
-
     /// Path to configuration file
     #[arg(short, long, default_value = "ralph.yml", global = true)]
     config: PathBuf,
@@ -211,6 +221,12 @@ enum Commands {
 
     /// Emit an event to .agent/events.jsonl with proper JSON formatting
     Emit(EmitArgs),
+
+    /// Start a Prompt-Driven Development planning session
+    Plan(PlanArgs),
+
+    /// Generate code task files from descriptions or plans
+    Task(TaskArgs),
 }
 
 /// Arguments for the init subcommand.
@@ -261,7 +277,6 @@ struct RunArgs {
     // ─────────────────────────────────────────────────────────────────────────
     // Execution Mode Options
     // ─────────────────────────────────────────────────────────────────────────
-
     /// Enable interactive TUI mode for real-time monitoring
     #[arg(short, long, conflicts_with = "autonomous")]
     interactive: bool,
@@ -280,7 +295,6 @@ struct RunArgs {
     // ─────────────────────────────────────────────────────────────────────────
     // Verbosity Options
     // ─────────────────────────────────────────────────────────────────────────
-
     /// Enable verbose output (show tool results and session summary)
     #[arg(short = 'v', long, conflicts_with = "quiet")]
     verbose: bool,
@@ -396,6 +410,38 @@ struct EmitArgs {
     pub file: PathBuf,
 }
 
+/// Arguments for the plan subcommand.
+///
+/// Starts an interactive PDD (Prompt-Driven Development) session.
+/// This is a thin wrapper that spawns the AI backend with the bundled
+/// PDD SOP, bypassing Ralph's event loop entirely.
+#[derive(Parser, Debug)]
+struct PlanArgs {
+    /// The rough idea to develop (optional - SOP will prompt if not provided)
+    #[arg(value_name = "IDEA")]
+    idea: Option<String>,
+
+    /// Backend to use (overrides config and auto-detection)
+    #[arg(short, long, value_name = "BACKEND")]
+    backend: Option<String>,
+}
+
+/// Arguments for the task subcommand.
+///
+/// Starts an interactive code-task-generator session.
+/// This is a thin wrapper that spawns the AI backend with the bundled
+/// code-task-generator SOP, bypassing Ralph's event loop entirely.
+#[derive(Parser, Debug)]
+struct TaskArgs {
+    /// Input: description text or path to PDD plan file
+    #[arg(value_name = "INPUT")]
+    input: Option<String>,
+
+    /// Backend to use (overrides config and auto-detection)
+    #[arg(short, long, value_name = "BACKEND")]
+    backend: Option<String>,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install panic hook to restore terminal state on crash
@@ -406,17 +452,19 @@ async fn main() -> Result<()> {
 
     // Initialize logging
     let filter = if cli.verbose { "debug" } else { "info" };
-    tracing_subscriber::fmt()
-        .with_env_filter(filter)
-        .init();
+    tracing_subscriber::fmt().with_env_filter(filter).init();
 
     match cli.command {
         Some(Commands::Run(args)) => run_command(cli.config, cli.verbose, cli.color, args).await,
-        Some(Commands::Resume(args)) => resume_command(cli.config, cli.verbose, cli.color, args).await,
+        Some(Commands::Resume(args)) => {
+            resume_command(cli.config, cli.verbose, cli.color, args).await
+        }
         Some(Commands::Events(args)) => events_command(cli.color, args),
         Some(Commands::Init(args)) => init_command(cli.color, args),
         Some(Commands::Clean(args)) => clean_command(cli.config, cli.color, args),
         Some(Commands::Emit(args)) => emit_command(cli.color, args),
+        Some(Commands::Plan(args)) => plan_command(cli.config, cli.color, args),
+        Some(Commands::Task(args)) => task_command(cli.config, cli.color, args),
         None => {
             // Default to run with no overrides (backwards compatibility)
             let args = RunArgs {
@@ -493,7 +541,9 @@ async fn run_command(
     }
 
     // Validate configuration and emit warnings
-    let warnings = config.validate().context("Configuration validation failed")?;
+    let warnings = config
+        .validate()
+        .context("Configuration validation failed")?;
     for warning in &warnings {
         eprintln!("{warning}");
     }
@@ -519,8 +569,15 @@ async fn run_command(
 
     if args.dry_run {
         println!("Dry run mode - configuration:");
-        println!("  Hats: {}", if config.hats.is_empty() { "planner, builder (default)".to_string() } else { config.hats.keys().cloned().collect::<Vec<_>>().join(", ") });
-        
+        println!(
+            "  Hats: {}",
+            if config.hats.is_empty() {
+                "planner, builder (default)".to_string()
+            } else {
+                config.hats.keys().cloned().collect::<Vec<_>>().join(", ")
+            }
+        );
+
         // Show prompt source
         if let Some(ref inline) = config.event_loop.prompt {
             let preview = if inline.len() > 60 {
@@ -532,8 +589,11 @@ async fn run_command(
         } else {
             println!("  Prompt file: {}", config.event_loop.prompt_file);
         }
-        
-        println!("  Completion promise: {}", config.event_loop.completion_promise);
+
+        println!(
+            "  Completion promise: {}",
+            config.event_loop.completion_promise
+        );
         println!("  Max iterations: {}", config.event_loop.max_iterations);
         println!("  Max runtime: {}s", config.event_loop.max_runtime_seconds);
         println!("  Backend: {}", config.cli.backend);
@@ -552,7 +612,14 @@ async fn run_command(
     // Run the orchestration loop and exit with proper exit code
     let enable_tui = args.interactive || args.tui; // Support both for backward compat
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
-    let reason = run_loop(config, color_mode, enable_tui, verbosity, args.record_session).await?;
+    let reason = run_loop(
+        config,
+        color_mode,
+        enable_tui,
+        verbosity,
+        args.record_session,
+    )
+    .await?;
     let exit_code = reason.exit_code();
 
     // Use explicit exit for non-zero codes to ensure proper exit status
@@ -622,7 +689,9 @@ async fn resume_command(
     }
 
     // Validate configuration
-    let warnings = config.validate().context("Configuration validation failed")?;
+    let warnings = config
+        .validate()
+        .context("Configuration validation failed")?;
     for warning in &warnings {
         eprintln!("{warning}");
     }
@@ -651,7 +720,15 @@ async fn resume_command(
     // signaling the planner to read the existing scratchpad
     let enable_tui = args.interactive || args.tui; // Support both for backward compat
     let verbosity = Verbosity::resolve(verbose || args.verbose, args.quiet);
-    let reason = run_loop_impl(config, color_mode, true, enable_tui, verbosity, args.record_session).await?;
+    let reason = run_loop_impl(
+        config,
+        color_mode,
+        true,
+        enable_tui,
+        verbosity,
+        args.record_session,
+    )
+    .await?;
     let exit_code = reason.exit_code();
 
     if exit_code != 0 {
@@ -676,7 +753,10 @@ fn init_command(color_mode: ColorMode, args: InitArgs) -> Result<()> {
         match init::init_from_preset(&preset, backend_override, args.force) {
             Ok(()) => {
                 let msg = if let Some(backend) = backend_override {
-                    format!("Created ralph.yml from '{}' preset with {} backend", preset, backend)
+                    format!(
+                        "Created ralph.yml from '{}' preset with {} backend",
+                        preset, backend
+                    )
                 } else {
                     format!("Created ralph.yml from '{}' preset", preset)
                 };
@@ -689,7 +769,9 @@ fn init_command(color_mode: ColorMode, args: InitArgs) -> Result<()> {
                     );
                 } else {
                     println!("{}", msg);
-                    println!("\nNext steps:\n  1. Create PROMPT.md with your task\n  2. Run: ralph run");
+                    println!(
+                        "\nNext steps:\n  1. Create PROMPT.md with your task\n  2. Run: ralph run"
+                    );
                 }
                 return Ok(());
             }
@@ -717,7 +799,9 @@ fn init_command(color_mode: ColorMode, args: InitArgs) -> Result<()> {
                     );
                 } else {
                     println!("Created ralph.yml with {} backend", backend);
-                    println!("\nNext steps:\n  1. Create PROMPT.md with your task\n  2. Run: ralph run");
+                    println!(
+                        "\nNext steps:\n  1. Create PROMPT.md with your task\n  2. Run: ralph run"
+                    );
                 }
                 return Ok(());
             }
@@ -778,16 +862,16 @@ fn events_command(color_mode: ColorMode, args: EventsArgs) -> Result<()> {
     if let Some(ref topic) = args.topic {
         records.retain(|r| r.topic == *topic);
     }
-    
+
     if let Some(iteration) = args.iteration {
         records.retain(|r| r.iteration == iteration);
     }
-    
+
     // Apply 'last' filter after other filters (to get last N of filtered results)
-    if let Some(n) = args.last {
-        if records.len() > n {
-            records = records.into_iter().rev().take(n).rev().collect();
-        }
+    if let Some(n) = args.last
+        && records.len() > n
+    {
+        records = records.into_iter().rev().take(n).rev().collect();
     }
 
     if records.is_empty() {
@@ -844,7 +928,10 @@ fn clean_command(config_path: PathBuf, color_mode: ColorMode, args: CleanArgs) -
                 agent_dir.display()
             );
         } else {
-            println!("Nothing to clean: Directory '{}' does not exist", agent_dir.display());
+            println!(
+                "Nothing to clean: Directory '{}' does not exist",
+                agent_dir.display()
+            );
         }
         return Ok(());
     }
@@ -885,7 +972,10 @@ fn clean_command(config_path: PathBuf, color_mode: ColorMode, args: CleanArgs) -
             agent_dir.display()
         );
     } else {
-        println!("Cleaned: Deleted '{}' and all contents", agent_dir.display());
+        println!(
+            "Cleaned: Deleted '{}' and all contents",
+            agent_dir.display()
+        );
     }
 
     Ok(())
@@ -905,8 +995,7 @@ fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
     // Validate JSON payload if --json flag is set
     let payload = if args.json && !args.payload.is_empty() {
         // Validate it's valid JSON
-        serde_json::from_str::<serde_json::Value>(&args.payload)
-            .context("Invalid JSON payload")?;
+        serde_json::from_str::<serde_json::Value>(&args.payload).context("Invalid JSON payload")?;
         args.payload
     } else {
         args.payload
@@ -928,12 +1017,11 @@ fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
     });
 
     // Ensure parent directory exists
-    if let Some(parent) = args.file.parent() {
-        if !parent.as_os_str().is_empty() {
-            fs::create_dir_all(parent).with_context(|| {
-                format!("Failed to create directory: {}", parent.display())
-            })?;
-        }
+    if let Some(parent) = args.file.parent()
+        && !parent.as_os_str().is_empty()
+    {
+        fs::create_dir_all(parent)
+            .with_context(|| format!("Failed to create directory: {}", parent.display()))?;
     }
 
     // Append to file
@@ -960,6 +1048,82 @@ fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
     }
 
     Ok(())
+}
+
+/// Starts a Prompt-Driven Development planning session.
+///
+/// This is a thin wrapper that bypasses Ralph's event loop entirely.
+/// It spawns the AI backend with the bundled PDD SOP for interactive planning.
+fn plan_command(config_path: PathBuf, color_mode: ColorMode, args: PlanArgs) -> Result<()> {
+    use sop_runner::{Sop, SopRunConfig, SopRunError};
+
+    let use_colors = color_mode.should_use_colors();
+
+    // Show what we're starting
+    if use_colors {
+        println!(
+            "{}🎯{} Starting {} session...",
+            colors::CYAN,
+            colors::RESET,
+            Sop::Pdd.name()
+        );
+    } else {
+        println!("Starting {} session...", Sop::Pdd.name());
+    }
+
+    let config = SopRunConfig {
+        sop: Sop::Pdd,
+        user_input: args.idea,
+        backend_override: args.backend,
+        config_path: Some(config_path),
+    };
+
+    sop_runner::run_sop(config).map_err(|e| match e {
+        SopRunError::NoBackend(no_backend) => anyhow::Error::new(no_backend),
+        SopRunError::UnknownBackend(name) => anyhow::anyhow!(
+            "Unknown backend: {}\n\nValid backends: claude, kiro, gemini, codex, amp",
+            name
+        ),
+        SopRunError::SpawnError(io_err) => anyhow::anyhow!("Failed to spawn backend: {}", io_err),
+    })
+}
+
+/// Starts a code-task-generator session.
+///
+/// This is a thin wrapper that bypasses Ralph's event loop entirely.
+/// It spawns the AI backend with the bundled code-task-generator SOP.
+fn task_command(config_path: PathBuf, color_mode: ColorMode, args: TaskArgs) -> Result<()> {
+    use sop_runner::{Sop, SopRunConfig, SopRunError};
+
+    let use_colors = color_mode.should_use_colors();
+
+    // Show what we're starting
+    if use_colors {
+        println!(
+            "{}📋{} Starting {} session...",
+            colors::CYAN,
+            colors::RESET,
+            Sop::CodeTaskGenerator.name()
+        );
+    } else {
+        println!("Starting {} session...", Sop::CodeTaskGenerator.name());
+    }
+
+    let config = SopRunConfig {
+        sop: Sop::CodeTaskGenerator,
+        user_input: args.input,
+        backend_override: args.backend,
+        config_path: Some(config_path),
+    };
+
+    sop_runner::run_sop(config).map_err(|e| match e {
+        SopRunError::NoBackend(no_backend) => anyhow::Error::new(no_backend),
+        SopRunError::UnknownBackend(name) => anyhow::anyhow!(
+            "Unknown backend: {}\n\nValid backends: claude, kiro, gemini, codex, amp",
+            name
+        ),
+        SopRunError::SpawnError(io_err) => anyhow::anyhow!("Failed to spawn backend: {}", io_err),
+    })
 }
 
 /// Lists directory contents recursively for dry-run mode.
@@ -1073,10 +1237,7 @@ fn print_events_table(records: &[ralph_core::EventRecord], use_colors: bool) {
 
     // Footer
     if use_colors {
-        println!(
-            "\n{DIM}Total: {} events{RESET}",
-            records.len()
-        );
+        println!("\n{DIM}Total: {} events{RESET}", records.len());
     } else {
         println!("\nTotal: {} events", records.len());
     }
@@ -1183,7 +1344,9 @@ fn truncate(s: &str, max_len: usize) -> String {
 /// for any event topic, including custom hats (e.g., "review.security" → "🔒 Security Reviewer").
 ///
 /// Only exact topic patterns (non-wildcard) are included to avoid pattern matching complexity.
-fn build_tui_hat_map(registry: &ralph_core::HatRegistry) -> std::collections::HashMap<String, (HatId, String)> {
+fn build_tui_hat_map(
+    registry: &ralph_core::HatRegistry,
+) -> std::collections::HashMap<String, (HatId, String)> {
     use std::collections::HashMap;
 
     let mut map = HashMap::new();
@@ -1251,8 +1414,22 @@ fn resolve_prompt_content(event_loop_config: &ralph_core::EventLoopConfig) -> Re
     )
 }
 
-async fn run_loop(config: RalphConfig, color_mode: ColorMode, enable_tui: bool, verbosity: Verbosity, record_session: Option<PathBuf>) -> Result<TerminationReason> {
-    run_loop_impl(config, color_mode, false, enable_tui, verbosity, record_session).await
+async fn run_loop(
+    config: RalphConfig,
+    color_mode: ColorMode,
+    enable_tui: bool,
+    verbosity: Verbosity,
+    record_session: Option<PathBuf>,
+) -> Result<TerminationReason> {
+    run_loop_impl(
+        config,
+        color_mode,
+        false,
+        enable_tui,
+        verbosity,
+        record_session,
+    )
+    .await
 }
 
 /// Core loop implementation supporting both fresh start and resume modes.
@@ -1261,7 +1438,14 @@ async fn run_loop(config: RalphConfig, color_mode: ColorMode, enable_tui: bool, 
 /// signaling the planner to read existing scratchpad rather than doing fresh gap analysis.
 ///
 /// `record_session`: If provided, records all events to the specified JSONL file for replay testing.
-async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool, enable_tui: bool, verbosity: Verbosity, record_session: Option<PathBuf>) -> Result<TerminationReason> {
+async fn run_loop_impl(
+    config: RalphConfig,
+    color_mode: ColorMode,
+    resume: bool,
+    enable_tui: bool,
+    verbosity: Verbosity,
+    record_session: Option<PathBuf>,
+) -> Result<TerminationReason> {
     // Set up process group leadership per spec
     // "The orchestrator must run as a process group leader"
     process_management::setup_process_group();
@@ -1315,8 +1499,9 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
     {
         let interrupt_tx_sigterm = interrupt_tx.clone();
         tokio::spawn(async move {
-            let mut sigterm = tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
-                .expect("Failed to register SIGTERM handler");
+            let mut sigterm =
+                tokio::signal::unix::signal(tokio::signal::unix::SignalKind::terminate())
+                    .expect("Failed to register SIGTERM handler");
             sigterm.recv().await;
             debug!("SIGTERM received, terminating immediately...");
             let _ = interrupt_tx_sigterm.send(true);
@@ -1357,27 +1542,29 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
 
     // Set up session recording if requested
     // This records all events to a JSONL file for replay testing
-    let _session_recorder: Option<Arc<SessionRecorder<BufWriter<File>>>> = if let Some(record_path) = record_session {
-        let file = File::create(&record_path)
-            .with_context(|| format!("Failed to create session recording file: {:?}", record_path))?;
-        let recorder = Arc::new(SessionRecorder::new(BufWriter::new(file)));
+    let _session_recorder: Option<Arc<SessionRecorder<BufWriter<File>>>> =
+        if let Some(record_path) = record_session {
+            let file = File::create(&record_path).with_context(|| {
+                format!("Failed to create session recording file: {:?}", record_path)
+            })?;
+            let recorder = Arc::new(SessionRecorder::new(BufWriter::new(file)));
 
-        // Record metadata for the session
-        recorder.record_meta(Record::meta_loop_start(
-            &config.event_loop.prompt_file,
-            config.event_loop.max_iterations,
-            if enable_tui { Some("tui") } else { Some("cli") },
-        ));
+            // Record metadata for the session
+            recorder.record_meta(Record::meta_loop_start(
+                &config.event_loop.prompt_file,
+                config.event_loop.max_iterations,
+                if enable_tui { Some("tui") } else { Some("cli") },
+            ));
 
-        // Wire observer to EventBus so events are recorded
-        let observer = SessionRecorder::make_observer(Arc::clone(&recorder));
-        event_loop.add_observer(observer);
+            // Wire observer to EventBus so events are recorded
+            let observer = SessionRecorder::make_observer(Arc::clone(&recorder));
+            event_loop.add_observer(observer);
 
-        info!("Session recording enabled: {:?}", record_path);
-        Some(recorder)
-    } else {
-        None
-    };
+            info!("Session recording enabled: {:?}", record_path);
+            Some(recorder)
+        } else {
+            None
+        };
 
     // Initialize event logger for debugging
     let mut event_logger = EventLogger::default_path();
@@ -1389,7 +1576,8 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
         ("task.start", "planner")
     };
     let start_event = Event::new(start_topic, &prompt_content);
-    let start_record = EventRecord::new(0, "loop", &start_event, Some(&HatId::new(start_triggered)));
+    let start_record =
+        EventRecord::new(0, "loop", &start_event, Some(&HatId::new(start_triggered)));
     if let Err(e) = event_logger.log(&start_record) {
         warn!("Failed to log start event: {}", e);
     }
@@ -1400,13 +1588,16 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
     let backend = if enable_tui && config.cli.backend == "claude" {
         CliBackend::claude_tui()
     } else {
-        CliBackend::from_config(&config.cli)
-            .map_err(|e| anyhow::Error::new(e))?
+        CliBackend::from_config(&config.cli).map_err(|e| anyhow::Error::new(e))?
     };
 
     // Create PTY executor if using interactive mode
     let mut pty_executor = if use_pty {
-        let idle_timeout_secs = if user_interactive { config.cli.idle_timeout_secs } else { 0 };
+        let idle_timeout_secs = if user_interactive {
+            config.cli.idle_timeout_secs
+        } else {
+            0
+        };
         let pty_config = PtyConfig {
             interactive: user_interactive,
             idle_timeout_secs,
@@ -1453,7 +1644,11 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
     };
 
     // Log execution mode - hat info already logged by initialize()
-    let exec_mode = if user_interactive { "interactive" } else { "autonomous" };
+    let exec_mode = if user_interactive {
+        "interactive"
+    } else {
+        "autonomous"
+    };
     debug!(execution_mode = %exec_mode, "Execution mode configured");
 
     // Track the last hat to detect hat changes for logging
@@ -1464,16 +1659,23 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
     const MAX_FALLBACK_ATTEMPTS: u32 = 3;
 
     // Helper closure to handle termination (writes summary, prints status)
-    let handle_termination = |reason: &TerminationReason, state: &ralph_core::LoopState, scratchpad: &str| {
+    let handle_termination = |reason: &TerminationReason,
+                              state: &ralph_core::LoopState,
+                              scratchpad: &str| {
         // Per spec: Write summary file on termination
         let summary_writer = SummaryWriter::default();
         let scratchpad_path = std::path::Path::new(scratchpad);
-        let scratchpad_opt = if scratchpad_path.exists() { Some(scratchpad_path) } else { None };
+        let scratchpad_opt = if scratchpad_path.exists() {
+            Some(scratchpad_path)
+        } else {
+            None
+        };
 
         // Get final commit SHA if available
         let final_commit = get_last_commit_info();
 
-        if let Err(e) = summary_writer.write(reason, state, scratchpad_opt, final_commit.as_deref()) {
+        if let Err(e) = summary_writer.write(reason, state, scratchpad_opt, final_commit.as_deref())
+        {
             warn!("Failed to write summary file: {}", e);
         }
 
@@ -1494,7 +1696,11 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
         if let Some(reason) = event_loop.check_termination() {
             // Per spec: Publish loop.terminate event to observers
             let terminate_event = event_loop.publish_terminate_event(&reason);
-            log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
+            log_terminate_event(
+                &mut event_logger,
+                event_loop.state().iteration,
+                &terminate_event,
+            );
             handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
             cleanup_tui(tui_handle);
             return Ok(reason);
@@ -1520,7 +1726,11 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
                     );
                     let reason = TerminationReason::Stopped;
                     let terminate_event = event_loop.publish_terminate_event(&reason);
-                    log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
+                    log_terminate_event(
+                        &mut event_logger,
+                        event_loop.state().iteration,
+                        &terminate_event,
+                    );
                     handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
                     cleanup_tui(tui_handle);
                     return Ok(reason);
@@ -1540,7 +1750,11 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
                 let reason = TerminationReason::Stopped;
                 // Per spec: Publish loop.terminate event to observers
                 let terminate_event = event_loop.publish_terminate_event(&reason);
-                log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
+                log_terminate_event(
+                    &mut event_logger,
+                    event_loop.state().iteration,
+                    &terminate_event,
+                );
                 handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
                 cleanup_tui(tui_handle);
                 return Ok(reason);
@@ -1577,7 +1791,10 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
             }
             last_hat = Some(hat_id.clone());
         }
-        debug!("Iteration {}/{} — {} active", iteration, config.event_loop.max_iterations, hat_id);
+        debug!(
+            "Iteration {}/{} — {} active",
+            iteration, config.event_loop.max_iterations, hat_id
+        );
 
         // Build prompt for this hat
         let prompt = match event_loop.build_prompt(&hat_id) {
@@ -1607,10 +1824,21 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
         let interrupt_rx_for_pty = interrupt_rx.clone();
         let execute_future = async {
             if use_pty {
-                execute_pty(pty_executor.as_mut(), &backend, &config, &prompt, user_interactive, interrupt_rx_for_pty, verbosity).await
+                execute_pty(
+                    pty_executor.as_mut(),
+                    &backend,
+                    &config,
+                    &prompt,
+                    user_interactive,
+                    interrupt_rx_for_pty,
+                    verbosity,
+                )
+                .await
             } else {
                 let executor = CliExecutor::new(backend.clone());
-                let result = executor.execute(&prompt, stdout(), timeout, verbosity == Verbosity::Verbose).await?;
+                let result = executor
+                    .execute(&prompt, stdout(), timeout, verbosity == Verbosity::Verbose)
+                    .await?;
                 Ok(ExecutionOutcome {
                     output: result.output,
                     success: result.success,
@@ -1647,7 +1875,11 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
 
         if let Some(reason) = outcome.termination {
             let terminate_event = event_loop.publish_terminate_event(&reason);
-            log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
+            log_terminate_event(
+                &mut event_logger,
+                event_loop.state().iteration,
+                &terminate_event,
+            );
             handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
             cleanup_tui(tui_handle);
             return Ok(reason);
@@ -1657,17 +1889,30 @@ async fn run_loop_impl(config: RalphConfig, color_mode: ColorMode, resume: bool,
         let success = outcome.success;
 
         // Log events from output before processing
-        log_events_from_output(&mut event_logger, iteration, &hat_id, &output, event_loop.registry());
+        log_events_from_output(
+            &mut event_logger,
+            iteration,
+            &hat_id,
+            &output,
+            event_loop.registry(),
+        );
 
         // Process output
         if let Some(reason) = event_loop.process_output(&hat_id, &output, success) {
             // Per spec: Log "All done! {promise} detected." when completion promise found
             if reason == TerminationReason::CompletionPromise {
-                info!("All done! {} detected.", config.event_loop.completion_promise);
+                info!(
+                    "All done! {} detected.",
+                    config.event_loop.completion_promise
+                );
             }
             // Per spec: Publish loop.terminate event to observers
             let terminate_event = event_loop.publish_terminate_event(&reason);
-            log_terminate_event(&mut event_logger, event_loop.state().iteration, &terminate_event);
+            log_terminate_event(
+                &mut event_logger,
+                event_loop.state().iteration,
+                &terminate_event,
+            );
             handle_termination(&reason, event_loop.state(), &config.core.scratchpad);
             cleanup_tui(tui_handle);
             return Ok(reason);
@@ -1759,7 +2004,11 @@ async fn execute_pty(
     let exec = if let Some(e) = executor {
         e
     } else {
-        let idle_timeout_secs = if interactive { config.cli.idle_timeout_secs } else { 0 };
+        let idle_timeout_secs = if interactive {
+            config.cli.idle_timeout_secs
+        } else {
+            0
+        };
         let pty_config = PtyConfig {
             interactive,
             idle_timeout_secs,
@@ -1789,15 +2038,18 @@ async fn execute_pty(
         match verbosity {
             Verbosity::Quiet => {
                 let mut handler = QuietStreamHandler;
-                exec.run_observe_streaming(prompt, interrupt_rx, &mut handler).await
+                exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
+                    .await
             }
             Verbosity::Normal => {
                 let mut handler = ConsoleStreamHandler::new(false);
-                exec.run_observe_streaming(prompt, interrupt_rx, &mut handler).await
+                exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
+                    .await
             }
             Verbosity::Verbose => {
                 let mut handler = ConsoleStreamHandler::new(true);
-                exec.run_observe_streaming(prompt, interrupt_rx, &mut handler).await
+                exec.run_observe_streaming(prompt, interrupt_rx, &mut handler)
+                    .await
             }
         }
     };
@@ -1896,7 +2148,10 @@ fn print_termination(reason: &TerminationReason, state: &ralph_core::LoopState, 
             "{BOLD}│{RESET} {color}{BOLD}{icon}{RESET} Loop terminated: {color}{label}{RESET}"
         );
         println!("{BOLD}├{separator}┤{RESET}");
-        println!("{BOLD}│{RESET}   Iterations:  {CYAN}{}{RESET}", state.iteration);
+        println!(
+            "{BOLD}│{RESET}   Iterations:  {CYAN}{}{RESET}",
+            state.iteration
+        );
         println!(
             "{BOLD}│{RESET}   Elapsed:     {CYAN}{:.1}s{RESET}",
             state.elapsed().as_secs_f64()
@@ -1930,11 +2185,7 @@ fn get_last_commit_info() -> Option<String> {
 
     if output.status.success() {
         let info = String::from_utf8_lossy(&output.stdout).trim().to_string();
-        if info.is_empty() {
-            None
-        } else {
-            Some(info)
-        }
+        if info.is_empty() { None } else { Some(info) }
     } else {
         None
     }
@@ -1963,11 +2214,17 @@ mod tests {
 
         // Autonomous mode: no user input forwarding
         let autonomous_interactive = false;
-        assert!(!autonomous_interactive, "Autonomous mode should not forward user input");
+        assert!(
+            !autonomous_interactive,
+            "Autonomous mode should not forward user input"
+        );
 
         // Interactive mode with TTY: forward user input
         let interactive_with_tty = true;
-        assert!(interactive_with_tty, "Interactive mode with TTY should forward user input");
+        assert!(
+            interactive_with_tty,
+            "Interactive mode with TTY should forward user input"
+        );
     }
 
     #[test]
