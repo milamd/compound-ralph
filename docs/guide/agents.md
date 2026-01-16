@@ -669,13 +669,21 @@ python ralph_orchestrator.py \
 
 Ralph v2.0 uses JSONL (JSON Lines) for event communication between agents and the orchestrator.
 
+Events are **routing signals**, not data transport. Keep payloads brief.
+
 ### Writing Events
 
 Agents write events to `.agent/events.jsonl`:
 
 ```json
-{"topic":"build.done","payload":"tests: pass","ts":"2026-01-14T19:30:00Z"}
+{"topic":"build.done","payload":"tests: pass, lint: pass","ts":"2026-01-14T19:30:00Z"}
 {"topic":"build.blocked","payload":"Missing dependency","ts":"2026-01-14T19:31:15Z"}
+```
+
+**Structured payloads** (preferred for complex data):
+
+```json
+{"topic":"review.done","payload":{"status":"approved","issues":0},"ts":"2026-01-14T19:30:00Z"}
 ```
 
 **Event structure:**
@@ -683,14 +691,28 @@ Agents write events to `.agent/events.jsonl`:
 | Field | Type | Required | Description |
 |-------|------|----------|-------------|
 | `topic` | string | Yes | Event topic (e.g., "build.done") |
-| `payload` | string | No | Optional event data |
+| `payload` | string or object | No | Brief event data (string or JSON object) |
 | `ts` | string | Yes | ISO 8601 timestamp |
+
+### JSONL Format Rules
+
+⚠️ **Critical**: JSONL requires each event to be a **single line**:
+
+- ✅ **DO**: Keep payloads brief and on one line
+- ✅ **DO**: Use JSON objects for structured data: `{"payload": {"status": "ok"}}`
+- ❌ **DON'T**: Use YAML formatting in payloads (causes literal newlines)
+- ❌ **DON'T**: Put multi-line content directly in payloads
+
+For detailed output, write to `.agent/scratchpad.md` and emit a brief event.
 
 ### Example: Builder Hat
 
 ```bash
-# Agent writes to .agent/events.jsonl
-echo '{"topic":"build.done","payload":"All tests passing","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' >> .agent/events.jsonl
+# Brief string payload
+echo '{"topic":"build.done","payload":"tests: pass","ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' >> .agent/events.jsonl
+
+# Structured object payload (preferred for complex data)
+echo '{"topic":"review.done","payload":{"status":"approved","files":3},"ts":"'$(date -u +%Y-%m-%dT%H:%M:%SZ)'"}' >> .agent/events.jsonl
 ```
 
 ### Reading Events

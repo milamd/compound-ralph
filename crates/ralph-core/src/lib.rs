@@ -31,7 +31,7 @@ pub use config::{CliConfig, CoreConfig, EventLoopConfig, EventMetadata, HatBacke
 pub use event_logger::{EventHistory, EventLogger, EventRecord};
 pub use event_loop::{EventLoop, LoopState, TerminationReason};
 pub use event_parser::EventParser;
-pub use event_reader::{Event, EventReader};
+pub use event_reader::{Event, EventReader, MalformedLine, ParseResult};
 pub use hat_registry::HatRegistry;
 pub use hatless_ralph::{HatInfo, HatTopology, HatlessRalph};
 pub use instructions::InstructionBuilder;

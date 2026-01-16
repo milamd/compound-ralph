@@ -19,7 +19,7 @@ use ralph_core::{EventHistory, EventLogger, EventLoop, EventParser, EventRecord,
 use ralph_proto::{Event, HatId};
 use ralph_tui::Tui;
 use std::fs::{self, File};
-use std::io::{stdout, BufWriter, IsTerminal};
+use std::io::{stdout, BufWriter, IsTerminal, Write};
 use std::path::{Path, PathBuf};
 use std::process::Command;
 use std::sync::Arc;
@@ -208,6 +208,9 @@ enum Commands {
 
     /// Clean up Ralph artifacts (.agent/ directory)
     Clean(CleanArgs),
+
+    /// Emit an event to .agent/events.jsonl with proper JSON formatting
+    Emit(EmitArgs),
 }
 
 /// Arguments for the init subcommand.
@@ -370,6 +373,29 @@ struct CleanArgs {
     dry_run: bool,
 }
 
+/// Arguments for the emit subcommand.
+#[derive(Parser, Debug)]
+struct EmitArgs {
+    /// Event topic (e.g., "build.done", "review.complete")
+    pub topic: String,
+
+    /// Event payload - string or JSON (optional, defaults to empty)
+    #[arg(default_value = "")]
+    pub payload: String,
+
+    /// Parse payload as JSON object instead of string
+    #[arg(long, short)]
+    pub json: bool,
+
+    /// Custom ISO 8601 timestamp (defaults to current time)
+    #[arg(long)]
+    pub ts: Option<String>,
+
+    /// Path to events file (defaults to .agent/events.jsonl)
+    #[arg(long, default_value = ".agent/events.jsonl")]
+    pub file: PathBuf,
+}
+
 #[tokio::main]
 async fn main() -> Result<()> {
     // Install panic hook to restore terminal state on crash
@@ -390,6 +416,7 @@ async fn main() -> Result<()> {
         Some(Commands::Events(args)) => events_command(cli.color, args),
         Some(Commands::Init(args)) => init_command(cli.color, args),
         Some(Commands::Clean(args)) => clean_command(cli.config, cli.color, args),
+        Some(Commands::Emit(args)) => emit_command(cli.color, args),
         None => {
             // Default to run with no overrides (backwards compatibility)
             let args = RunArgs {
@@ -859,6 +886,77 @@ fn clean_command(config_path: PathBuf, color_mode: ColorMode, args: CleanArgs) -
         );
     } else {
         println!("Cleaned: Deleted '{}' and all contents", agent_dir.display());
+    }
+
+    Ok(())
+}
+
+/// Emit an event to .agent/events.jsonl with proper JSON formatting.
+///
+/// This command provides a deterministic way for agents to emit events without
+/// risking malformed JSONL from manual echo commands. All JSON serialization
+/// is handled via serde_json, ensuring proper escaping of payloads.
+fn emit_command(color_mode: ColorMode, args: EmitArgs) -> Result<()> {
+    let use_colors = color_mode.should_use_colors();
+
+    // Generate timestamp if not provided
+    let ts = args.ts.unwrap_or_else(|| chrono::Utc::now().to_rfc3339());
+
+    // Validate JSON payload if --json flag is set
+    let payload = if args.json && !args.payload.is_empty() {
+        // Validate it's valid JSON
+        serde_json::from_str::<serde_json::Value>(&args.payload)
+            .context("Invalid JSON payload")?;
+        args.payload
+    } else {
+        args.payload
+    };
+
+    // Build the event record
+    // We use serde_json directly to ensure proper escaping
+    let record = serde_json::json!({
+        "topic": args.topic,
+        "payload": if args.json && !payload.is_empty() {
+            // Parse and embed as object
+            serde_json::from_str::<serde_json::Value>(&payload)?
+        } else if payload.is_empty() {
+            serde_json::Value::Null
+        } else {
+            serde_json::Value::String(payload)
+        },
+        "ts": ts
+    });
+
+    // Ensure parent directory exists
+    if let Some(parent) = args.file.parent() {
+        if !parent.as_os_str().is_empty() {
+            fs::create_dir_all(parent).with_context(|| {
+                format!("Failed to create directory: {}", parent.display())
+            })?;
+        }
+    }
+
+    // Append to file
+    let mut file = fs::OpenOptions::new()
+        .create(true)
+        .append(true)
+        .open(&args.file)
+        .with_context(|| format!("Failed to open events file: {}", args.file.display()))?;
+
+    // Write as single-line JSON (JSONL format)
+    let json_line = serde_json::to_string(&record)?;
+    writeln!(file, "{}", json_line)?;
+
+    // Success message
+    if use_colors {
+        println!(
+            "{}✓{} Event emitted: {}",
+            colors::GREEN,
+            colors::RESET,
+            args.topic
+        );
+    } else {
+        println!("Event emitted: {}", args.topic);
     }
 
     Ok(())
@@ -1798,6 +1896,7 @@ fn print_termination(reason: &TerminationReason, state: &ralph_core::LoopState, 
         TerminationReason::MaxCost => (YELLOW, "⚠", "Maximum cost exceeded"),
         TerminationReason::ConsecutiveFailures => (RED, "✗", "Too many consecutive failures"),
         TerminationReason::LoopThrashing => (RED, "🔄", "Loop thrashing detected"),
+        TerminationReason::ValidationFailure => (RED, "⚠", "Too many malformed JSONL events"),
         TerminationReason::Stopped => (CYAN, "■", "Manually stopped"),
         TerminationReason::Interrupted => (YELLOW, "⚡", "Interrupted by signal"),
     };

@@ -28,6 +28,8 @@ pub enum TerminationReason {
     ConsecutiveFailures,
     /// Loop thrashing detected (repeated blocked events).
     LoopThrashing,
+    /// Too many consecutive malformed JSONL lines in events file.
+    ValidationFailure,
     /// Manually stopped.
     Stopped,
     /// Interrupted by signal (SIGINT/SIGTERM).
@@ -45,8 +47,9 @@ impl TerminationReason {
     pub fn exit_code(&self) -> i32 {
         match self {
             TerminationReason::CompletionPromise => 0,
-            TerminationReason::ConsecutiveFailures 
-            | TerminationReason::LoopThrashing 
+            TerminationReason::ConsecutiveFailures
+            | TerminationReason::LoopThrashing
+            | TerminationReason::ValidationFailure
             | TerminationReason::Stopped => 1,
             TerminationReason::MaxIterations
             | TerminationReason::MaxRuntime
@@ -67,6 +70,7 @@ impl TerminationReason {
             TerminationReason::MaxCost => "max_cost",
             TerminationReason::ConsecutiveFailures => "consecutive_failures",
             TerminationReason::LoopThrashing => "loop_thrashing",
+            TerminationReason::ValidationFailure => "validation_failure",
             TerminationReason::Stopped => "stopped",
             TerminationReason::Interrupted => "interrupted",
         }
@@ -98,6 +102,8 @@ pub struct LoopState {
     pub abandoned_task_redispatches: u32,
     /// Number of consecutive completion confirmations (requires 2 for termination).
     pub completion_confirmations: u32,
+    /// Consecutive malformed JSONL lines encountered (for validation backpressure).
+    pub consecutive_malformed_events: u32,
 }
 
 impl Default for LoopState {
@@ -114,6 +120,7 @@ impl Default for LoopState {
             abandoned_tasks: Vec::new(),
             abandoned_task_redispatches: 0,
             completion_confirmations: 0,
+            consecutive_malformed_events: 0,
         }
     }
 }
@@ -268,6 +275,11 @@ impl EventLoop {
         // Check for loop thrashing: planner keeps dispatching abandoned tasks
         if self.state.abandoned_task_redispatches >= 3 {
             return Some(TerminationReason::LoopThrashing);
+        }
+
+        // Check for validation failures: too many consecutive malformed JSONL lines
+        if self.state.consecutive_malformed_events >= 3 {
+            return Some(TerminationReason::ValidationFailure);
         }
 
         None
@@ -493,7 +505,10 @@ impl EventLoop {
     /// Call this before executing a hat, then use `check_default_publishes`
     /// after execution to inject a fallback event if needed.
     pub fn record_event_count(&mut self) -> usize {
-        self.event_reader.read_new_events().unwrap_or_default().len()
+        self.event_reader
+            .read_new_events()
+            .map(|r| r.events.len())
+            .unwrap_or(0)
     }
 
     /// Checks if hat wrote any events, and injects default if configured.
@@ -502,7 +517,11 @@ impl EventLoop {
     /// If no new events were written AND the hat has `default_publishes` configured,
     /// this will inject the default event automatically.
     pub fn check_default_publishes(&mut self, hat_id: &HatId, _events_before: usize) {
-        let events_after = self.event_reader.read_new_events().unwrap_or_default().len();
+        let events_after = self
+            .event_reader
+            .read_new_events()
+            .map(|r| r.events.len())
+            .unwrap_or(0);
         
         if events_after == 0 {
             // No new events written
@@ -773,17 +792,45 @@ impl EventLoop {
 
     /// Processes events from JSONL and routes orphaned events to Ralph.
     ///
+    /// Also handles backpressure for malformed JSONL lines by:
+    /// 1. Emitting `event.malformed` system events for each parse failure
+    /// 2. Tracking consecutive failures for termination check
+    /// 3. Resetting counter when valid events are parsed
+    ///
     /// Returns true if Ralph should be invoked to handle orphaned events.
     pub fn process_events_from_jsonl(&mut self) -> std::io::Result<bool> {
-        let events = self.event_reader.read_new_events()?;
-        
-        if events.is_empty() {
+        let result = self.event_reader.read_new_events()?;
+
+        // Handle malformed lines with backpressure
+        for malformed in &result.malformed {
+            let payload = format!(
+                "Line {}: {}\nContent: {}",
+                malformed.line_number,
+                malformed.error,
+                &malformed.content
+            );
+            let event = Event::new("event.malformed", &payload);
+            self.bus.publish(event);
+            self.state.consecutive_malformed_events += 1;
+            warn!(
+                line = malformed.line_number,
+                consecutive = self.state.consecutive_malformed_events,
+                "Malformed event line detected"
+            );
+        }
+
+        // Reset counter when valid events are parsed
+        if !result.events.is_empty() {
+            self.state.consecutive_malformed_events = 0;
+        }
+
+        if result.events.is_empty() && result.malformed.is_empty() {
             return Ok(false);
         }
 
         let mut has_orphans = false;
 
-        for event in events {
+        for event in result.events {
             // Check if any hat subscribes to this event
             if self.registry.has_subscriber(&event.topic) {
                 // Route to subscriber via EventBus
@@ -876,6 +923,7 @@ fn termination_status_text(reason: &TerminationReason) -> &'static str {
         TerminationReason::MaxCost => "Stopped at cost limit.",
         TerminationReason::ConsecutiveFailures => "Too many consecutive failures.",
         TerminationReason::LoopThrashing => "Loop thrashing detected - same hat repeatedly blocked.",
+        TerminationReason::ValidationFailure => "Too many consecutive malformed JSONL events.",
         TerminationReason::Stopped => "Manually stopped.",
         TerminationReason::Interrupted => "Interrupted by signal.",
     }

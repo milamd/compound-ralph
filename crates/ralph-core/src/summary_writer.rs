@@ -129,6 +129,7 @@ impl SummaryWriter {
             TerminationReason::MaxCost => "Stopped: max cost exceeded",
             TerminationReason::ConsecutiveFailures => "Failed: too many consecutive failures",
             TerminationReason::LoopThrashing => "Failed: loop thrashing detected",
+            TerminationReason::ValidationFailure => "Failed: too many malformed JSONL events",
             TerminationReason::Stopped => "Stopped manually",
             TerminationReason::Interrupted => "Interrupted by signal",
         }
@@ -227,6 +228,7 @@ mod tests {
             abandoned_tasks: Vec::new(),
             abandoned_task_redispatches: 0,
             completion_confirmations: 0,
+            consecutive_malformed_events: 0,
         }
     }
 

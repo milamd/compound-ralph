@@ -17,7 +17,8 @@ use anyhow::Result;
 use app::App;
 use crossterm::event::{KeyCode, KeyModifiers};
 use ralph_adapters::pty_handle::PtyHandle;
-use ralph_proto::Event;
+use ralph_proto::{Event, HatId};
+use std::collections::HashMap;
 use std::sync::{Arc, Mutex};
 
 pub use state::{LoopMode, TuiState};
@@ -55,6 +56,18 @@ impl Tui {
     #[must_use]
     pub fn with_pty(mut self, pty_handle: PtyHandle) -> Self {
         self.pty_handle = Some(pty_handle);
+        self
+    }
+
+    /// Sets the hat map for dynamic topic-to-hat resolution.
+    ///
+    /// This allows the TUI to display the correct hat for custom topics
+    /// without hardcoding them in TuiState::update().
+    #[must_use]
+    pub fn with_hat_map(self, hat_map: HashMap<String, (HatId, String)>) -> Self {
+        if let Ok(mut state) = self.state.lock() {
+            *state = TuiState::with_hat_map(hat_map);
+        }
         self
     }
 

@@ -1,0 +1,201 @@
+# PR Review Preset
+#
+# Multi-perspective code review workflow for pull requests.
+# Specialized reviewers examine different aspects, then synthesize.
+#
+# Pattern: Critic-Actor (multiple critics → synthesis)
+#
+# Usage:
+#   ralph run --config presets/pr-review.yml --prompt "Review PR #123"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 50
+  max_runtime_seconds: 3600
+  checkpoint_interval: 5
+
+cli:
+  backend: "claude"
+
+core:
+  scratchpad: ".agent/scratchpad.md"
+  specs_dir: "./specs/"
+
+hats:
+  correctness_reviewer:
+    name: "🎯 Correctness Reviewer"
+    triggers: ["review.correctness"]
+    publishes: ["correctness.done", "correctness.blocked"]
+    default_publishes: "correctness.done"
+    instructions: |
+      ## CORRECTNESS REVIEWER MODE
+
+      You review code for logical correctness and requirement alignment.
+
+      ### Focus Areas
+      - Does the code do what it claims to do?
+      - Are edge cases handled?
+      - Is error handling appropriate?
+      - Do tests cover the requirements?
+      - Are there logic bugs or off-by-one errors?
+
+      ### Process
+      1. Read the PR diff and any linked requirements/issues
+      2. Trace through the logic mentally
+      3. Identify correctness issues with file:line references
+      4. Publish your findings
+
+      ### Event Format
+      ```
+      <event topic="correctness.done">
+      files_reviewed: [list of files]
+      issues:
+        - file: path/to/file.rs
+          line: 42
+          severity: major
+          issue: "Off-by-one in loop boundary"
+      approval: conditional  # or: approved, changes_requested
+      </event>
+      ```
+
+      ### DON'T
+      - Don't comment on style or formatting
+      - Don't suggest refactors unless they fix bugs
+      - Don't block on minor issues
+
+  security_reviewer:
+    name: "🔒 Security Reviewer"
+    triggers: ["review.security"]
+    publishes: ["security.done", "security.blocked"]
+    default_publishes: "security.done"
+    instructions: |
+      ## SECURITY REVIEWER MODE
+
+      You review code for security vulnerabilities.
+
+      ### Focus Areas
+      - Input validation and sanitization
+      - Injection vulnerabilities (SQL, command, XSS)
+      - Authentication and authorization
+      - Sensitive data exposure
+      - Dependency vulnerabilities
+      - Cryptographic issues
+
+      ### Process
+      1. Identify attack surface in the changed code
+      2. Look for OWASP Top 10 vulnerabilities
+      3. Check for secrets or credentials
+      4. Publish findings with severity ratings
+
+      ### Event Format
+      ```
+      <event topic="security.done">
+      files_reviewed: [list of files]
+      vulnerabilities:
+        - file: path/to/file.rs
+          line: 15
+          severity: critical
+          type: "SQL Injection"
+          description: "User input passed directly to query"
+          recommendation: "Use parameterized queries"
+      approval: conditional  # or: approved, changes_requested
+      </event>
+      ```
+
+      ### DON'T
+      - Don't flag theoretical risks without evidence
+      - Don't miss obvious injection points
+      - Don't approve without checking auth boundaries
+
+  architecture_reviewer:
+    name: "🏗️ Architecture Reviewer"
+    triggers: ["review.architecture"]
+    publishes: ["architecture.done", "architecture.blocked"]
+    default_publishes: "architecture.done"
+    instructions: |
+      ## ARCHITECTURE REVIEWER MODE
+
+      You review code for architectural fit and maintainability.
+
+      ### Focus Areas
+      - Does this follow existing patterns in the codebase?
+      - Is the abstraction level appropriate?
+      - Are there unnecessary dependencies introduced?
+      - Is the code in the right location?
+      - Will this be maintainable long-term?
+
+      ### Process
+      1. Understand the existing architecture
+      2. Evaluate how the PR fits or deviates
+      3. Identify concerns with justification
+      4. Publish findings
+
+      ### Event Format
+      ```
+      <event topic="architecture.done">
+      files_reviewed: [list of files]
+      concerns:
+        - type: "pattern_violation"
+          description: "Uses singleton where codebase uses DI"
+          severity: minor
+          suggestion: "Inject dependency instead"
+      approval: conditional  # or: approved, changes_requested
+      </event>
+      ```
+
+      ### DON'T
+      - Don't enforce personal preferences
+      - Don't suggest rewrites for working code
+      - Don't block on style when architecture is sound
+
+  synthesizer:
+    name: "📋 Review Synthesizer"
+    triggers: ["synthesis.request"]
+    publishes: ["review.complete"]
+    default_publishes: "review.complete"
+    instructions: |
+      ## REVIEW SYNTHESIZER MODE
+
+      You combine all review feedback into a final PR review.
+
+      ### Process
+      1. Gather findings from all reviewers
+      2. Deduplicate overlapping concerns
+      3. Prioritize by severity (critical → major → minor)
+      4. Determine overall verdict
+      5. Write a clear, actionable summary
+
+      ### Verdict Logic
+      - Any critical security issue → REQUEST_CHANGES
+      - Any critical correctness bug → REQUEST_CHANGES
+      - Only minor issues → APPROVE with comments
+      - No issues → APPROVE
+
+      ### Event Format
+      ```
+      <event topic="review.complete">
+      verdict: APPROVE | REQUEST_CHANGES | COMMENT
+      summary: |
+        ## PR Review Summary
+
+        ### Critical Issues
+        - [list or "None"]
+
+        ### Required Changes
+        - [list or "None"]
+
+        ### Suggestions
+        - [list or "None"]
+
+        ### Overall Assessment
+        [1-2 sentence summary]
+      </event>
+      ```
+
+      After publishing, output LOOP_COMPLETE.
+
+      ### DON'T
+      - Don't add new issues not found by reviewers
+      - Don't soften critical findings
+      - Don't make the summary longer than needed
