@@ -5,6 +5,7 @@
 [![Build](https://img.shields.io/github/actions/workflow/status/mikeyobrien/ralph-orchestrator/ci.yml?branch=main&label=CI)](https://github.com/mikeyobrien/ralph-orchestrator/actions)
 [![Coverage](https://img.shields.io/badge/coverage-65%25-yellowgreen)](coverage/index.html)
 [![Mentioned in Awesome Claude Code](https://awesome.re/mentioned-badge.svg)](https://github.com/hesreallyhim/awesome-claude-code)
+[![Docs](https://img.shields.io/badge/docs-mkdocs-blue)](https://mikeyobrien.github.io/ralph-orchestrator/)
 
 
 A hat-based orchestration framework that keeps Ralph in a loop until the task is done.
