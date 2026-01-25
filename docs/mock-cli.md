@@ -482,9 +482,3 @@ Error: cassette parse error in cassettes/e2e/test.jsonl
 3. **Hybrid approach**: Mock for most scenarios, real for critical paths
 4. **Cassette freshness**: Re-record cassettes quarterly or when backends update
 
-## Related Documentation
-
-- [E2E Testing Guide](./e2e-testing.md) - Overview of E2E test framework
-- [Session Recording](./session-recording.md) - How to record cassettes
-- [Custom Backends](./custom-backends.md) - Implementing custom backend adapters
-- [CI/CD Integration](./ci-cd.md) - Running tests in CI pipelines
