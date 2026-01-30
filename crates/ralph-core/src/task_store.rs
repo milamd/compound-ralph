@@ -18,6 +18,7 @@ use crate::file_lock::FileLock;
 use crate::task::{Task, TaskStatus};
 use std::io;
 use std::path::Path;
+use tracing::warn;
 
 /// A store for managing tasks with JSONL persistence and file locking.
 pub struct TaskStore {
@@ -26,11 +27,26 @@ pub struct TaskStore {
     lock: FileLock,
 }
 
+/// Parses a JSONL line into a Task, logging a warning on failure.
+fn parse_task_line(line: &str) -> Option<Task> {
+    match serde_json::from_str(line) {
+        Ok(task) => Some(task),
+        Err(e) => {
+            warn!(
+                error = %e,
+                line = line.chars().take(200).collect::<String>(),
+                "Skipping malformed task line in JSONL"
+            );
+            None
+        }
+    }
+}
+
 impl TaskStore {
     /// Loads tasks from the JSONL file at the given path.
     ///
     /// If the file doesn't exist, returns an empty store.
-    /// Silently skips malformed JSON lines.
+    /// Logs warnings for malformed JSON lines and skips them.
     ///
     /// Uses a shared lock to allow concurrent reads from multiple loops.
     pub fn load(path: &Path) -> io::Result<Self> {
@@ -42,7 +58,7 @@ impl TaskStore {
             content
                 .lines()
                 .filter(|line| !line.trim().is_empty())
-                .filter_map(|line| serde_json::from_str(line).ok())
+                .filter_map(|line| parse_task_line(line))
                 .collect()
         } else {
             Vec::new()
@@ -68,8 +84,15 @@ impl TaskStore {
         let content: String = self
             .tasks
             .iter()
-            .map(|t| serde_json::to_string(t).unwrap())
-            .collect::<Vec<_>>()
+            .map(|t| {
+                serde_json::to_string(t).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("task serialization failed: {e}"),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
             .join("\n");
         std::fs::write(
             &self.path,
@@ -83,6 +106,7 @@ impl TaskStore {
 
     /// Reloads tasks from disk, useful after external modifications.
     ///
+    /// Logs warnings for malformed JSON lines and skips them.
     /// Uses a shared lock to allow concurrent reads.
     pub fn reload(&mut self) -> io::Result<()> {
         let _guard = self.lock.shared()?;
@@ -92,7 +116,7 @@ impl TaskStore {
             content
                 .lines()
                 .filter(|line| !line.trim().is_empty())
-                .filter_map(|line| serde_json::from_str(line).ok())
+                .filter_map(|line| parse_task_line(line))
                 .collect()
         } else {
             Vec::new()
@@ -127,7 +151,7 @@ impl TaskStore {
             content
                 .lines()
                 .filter(|line| !line.trim().is_empty())
-                .filter_map(|line| serde_json::from_str(line).ok())
+                .filter_map(|line| parse_task_line(line))
                 .collect()
         } else {
             Vec::new()
@@ -143,8 +167,15 @@ impl TaskStore {
         let content: String = self
             .tasks
             .iter()
-            .map(|t| serde_json::to_string(t).unwrap())
-            .collect::<Vec<_>>()
+            .map(|t| {
+                serde_json::to_string(t).map_err(|e| {
+                    io::Error::new(
+                        io::ErrorKind::InvalidData,
+                        format!("task serialization failed: {e}"),
+                    )
+                })
+            })
+            .collect::<Result<Vec<_>, _>>()?
             .join("\n");
         std::fs::write(
             &self.path,
@@ -456,5 +487,28 @@ mod tests {
         // Both tasks should be present
         let final_store = TaskStore::load(tmp.path().join("tasks.jsonl").as_ref()).unwrap();
         assert_eq!(final_store.all().len(), 2);
+    }
+
+    #[test]
+    fn test_load_skips_malformed_lines() {
+        let tmp = TempDir::new().unwrap();
+        let path = tmp.path().join("tasks.jsonl");
+
+        // Write a file with one valid task line and some malformed lines
+        let mut store = TaskStore::load(&path).unwrap();
+        let task = Task::new("Valid task".to_string(), 1);
+        store.add(task);
+        store.save().unwrap();
+
+        // Append malformed lines to the file
+        let mut content = std::fs::read_to_string(&path).unwrap();
+        content.push_str("this is not json\n");
+        content.push_str("{\"broken\": true}\n");
+        std::fs::write(&path, content).unwrap();
+
+        // Load should succeed with only the valid task
+        let loaded = TaskStore::load(&path).unwrap();
+        assert_eq!(loaded.all().len(), 1);
+        assert_eq!(loaded.all()[0].title, "Valid task");
     }
 }
