@@ -174,6 +174,7 @@ mod tests {
         let state = TelegramState {
             chat_id: None,
             last_seen: None,
+            last_update_id: None,
             pending_questions: HashMap::new(),
         };
         (handler, dir, state)

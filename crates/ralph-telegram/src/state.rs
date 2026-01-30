@@ -15,6 +15,10 @@ pub struct TelegramState {
     /// Timestamp of the last message seen.
     pub last_seen: Option<DateTime<Utc>>,
 
+    /// Last Telegram update ID processed by the bot.
+    #[serde(default)]
+    pub last_update_id: Option<i32>,
+
     /// Pending questions keyed by loop ID, tracking which message awaits a reply.
     #[serde(default)]
     pub pending_questions: HashMap<String, PendingQuestion>,
@@ -70,6 +74,7 @@ impl StateManager {
         Ok(self.load()?.unwrap_or_else(|| TelegramState {
             chat_id: None,
             last_seen: None,
+            last_update_id: None,
             pending_questions: HashMap::new(),
         }))
     }
@@ -143,12 +148,14 @@ mod tests {
         let state = TelegramState {
             chat_id: Some(123_456),
             last_seen: Some(Utc::now()),
+            last_update_id: Some(101),
             pending_questions: HashMap::new(),
         };
         mgr.save(&state).unwrap();
 
         let loaded = mgr.load().unwrap().unwrap();
         assert_eq!(loaded.chat_id, Some(123_456));
+        assert_eq!(loaded.last_update_id, Some(101));
     }
 
     #[test]

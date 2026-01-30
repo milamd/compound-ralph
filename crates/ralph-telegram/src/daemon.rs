@@ -19,6 +19,13 @@ use ralph_proto::daemon::{DaemonAdapter, StartLoopFn};
 
 use crate::bot::{BotApi, TelegramBot, escape_html};
 use crate::loop_lock::{LockState, lock_path, lock_state};
+use crate::state::StateManager;
+
+async fn wait_for_shutdown(shutdown: Arc<AtomicBool>) {
+    while !shutdown.load(Ordering::Relaxed) {
+        tokio::time::sleep(std::time::Duration::from_millis(200)).await;
+    }
+}
 
 /// A Telegram-based daemon adapter.
 ///
@@ -50,6 +57,8 @@ impl DaemonAdapter for TelegramDaemon {
         let bot = TelegramBot::new(&self.bot_token);
         let chat_id = self.chat_id;
 
+        let state_manager = StateManager::new(workspace_root.join(".ralph/telegram-state.json"));
+
         // Send greeting
         let _ = bot.send_message(chat_id, "Ralph daemon online 🤖").await;
 
@@ -77,9 +86,14 @@ impl DaemonAdapter for TelegramDaemon {
         let mut offset: i32 = 0;
 
         // Main daemon loop
-        while !shutdown.load(Ordering::Relaxed) {
+        'daemon: while !shutdown.load(Ordering::Relaxed) {
             // ── Idle: poll Telegram for messages ──
-            let updates = match poll_updates(&self.bot_token, 30, offset).await {
+            let updates = match tokio::select! {
+                _ = wait_for_shutdown(shutdown.clone()) => {
+                    break 'daemon;
+                }
+                updates = poll_updates(&self.bot_token, 30, offset) => updates,
+            } {
                 Ok(u) => u,
                 Err(e) => {
                     warn!(error = %e, "Telegram poll failed, retrying");
@@ -95,6 +109,19 @@ impl DaemonAdapter for TelegramDaemon {
                     Some(t) => t,
                     None => continue,
                 };
+
+                if let Ok(mut state) = state_manager.load_or_default() {
+                    if state.chat_id.is_none() {
+                        state.chat_id = Some(chat_id);
+                    }
+                    state.last_seen = Some(chrono::Utc::now());
+                    state.last_update_id = Some(update.update_id);
+                    if let Err(e) = state_manager.save(&state) {
+                        warn!(error = %e, "Failed to persist Telegram state");
+                    }
+                } else {
+                    warn!("Failed to load Telegram state");
+                }
 
                 info!(text = %text, "Daemon received message");
 
@@ -167,16 +194,32 @@ impl DaemonAdapter for TelegramDaemon {
                 // The loop's TelegramService polls getUpdates, handles commands,
                 // guidance, responses, check-ins. We just await completion.
                 let prompt = text.to_string();
-                let result = start_loop(prompt).await;
+                let mut loop_handle = tokio::spawn(start_loop(prompt));
+                let result = tokio::select! {
+                    _ = wait_for_shutdown(shutdown.clone()) => {
+                        loop_handle.abort();
+                        let _ = loop_handle.await;
+                        break 'daemon;
+                    }
+                    result = &mut loop_handle => result,
+                };
 
                 // Loop finished — daemon resumes polling.
-                let notification = match result {
-                    Ok(description) => {
-                        format!("Loop complete ({}).", escape_html(&description))
+                match result {
+                    Ok(Ok(description)) => {
+                        let notification =
+                            format!("Loop complete ({}).", escape_html(&description));
+                        let _ = bot.send_message(chat_id, &notification).await;
                     }
-                    Err(e) => format!("Loop failed: {}", escape_html(&e.to_string())),
-                };
-                let _ = bot.send_message(chat_id, &notification).await;
+                    Ok(Err(e)) => {
+                        let notification = format!("Loop failed: {}", escape_html(&e.to_string()));
+                        let _ = bot.send_message(chat_id, &notification).await;
+                    }
+                    Err(e) => {
+                        let notification = format!("Loop failed: {}", escape_html(&e.to_string()));
+                        let _ = bot.send_message(chat_id, &notification).await;
+                    }
+                }
             }
         }
 

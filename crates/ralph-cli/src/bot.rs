@@ -9,6 +9,9 @@ use anyhow::{Context, Result};
 use clap::{Parser, Subcommand};
 use std::io::{self, Write};
 use std::path::Path;
+use tracing::warn;
+
+use crate::ConfigSource;
 
 // ─────────────────────────────────────────────────────────────────────────────
 // CLI STRUCTS
@@ -59,22 +62,24 @@ pub struct TestArgs {
 }
 
 #[derive(Parser, Debug)]
-pub struct DaemonArgs {
-    /// Config file to use for loops started by the daemon (default: ralph.yml)
-    #[arg(short = 'c', long = "config")]
-    pub config: Option<std::path::PathBuf>,
-}
+pub struct DaemonArgs {}
 
 // ─────────────────────────────────────────────────────────────────────────────
 // DISPATCHER
 // ─────────────────────────────────────────────────────────────────────────────
 
-pub async fn execute(args: BotArgs, use_colors: bool) -> Result<()> {
+pub async fn execute(
+    args: BotArgs,
+    config_sources: &[ConfigSource],
+    use_colors: bool,
+) -> Result<()> {
     match args.command {
         BotCommands::Onboard(onboard_args) => onboard_telegram(onboard_args, use_colors).await,
         BotCommands::Status => bot_status(use_colors).await,
         BotCommands::Test(test_args) => bot_test(test_args, use_colors).await,
-        BotCommands::Daemon(daemon_args) => run_daemon(daemon_args, use_colors).await,
+        BotCommands::Daemon(daemon_args) => {
+            run_daemon(daemon_args, config_sources, use_colors).await
+        }
     }
 }
 
@@ -394,17 +399,43 @@ async fn bot_test(args: TestArgs, use_colors: bool) -> Result<()> {
 ///
 /// Currently only Telegram is supported. The adapter implements
 /// [`DaemonAdapter`] and handles all platform-specific concerns.
-async fn run_daemon(args: DaemonArgs, use_colors: bool) -> Result<()> {
+async fn run_daemon(
+    _args: DaemonArgs,
+    config_sources: &[ConfigSource],
+    use_colors: bool,
+) -> Result<()> {
     use ralph_proto::DaemonAdapter;
 
     let workspace_root = std::env::current_dir().context("Failed to get current directory")?;
-    let config_path = args.config.map(|path| {
-        if path.is_absolute() {
-            path
+    let (primary_sources, overrides): (Vec<_>, Vec<_>) = config_sources
+        .iter()
+        .partition(|s| !matches!(s, ConfigSource::Override { .. }));
+    if primary_sources.len() > 1 {
+        warn!("Multiple config sources specified, using first one. Others ignored.");
+    }
+    if !overrides.is_empty() {
+        warn!("Config overrides are ignored for bot daemon loops.");
+    }
+
+    let config_path = match primary_sources.first() {
+        Some(ConfigSource::File(path)) => Some(if path.is_absolute() {
+            path.clone()
         } else {
             workspace_root.join(path)
+        }),
+        Some(ConfigSource::Builtin(_)) => {
+            anyhow::bail!(
+                "Builtin presets are not supported for `ralph bot daemon`. Use a file path via -c/--config."
+            );
         }
-    });
+        Some(ConfigSource::Remote(_)) => {
+            anyhow::bail!(
+                "Remote config URLs are not supported for `ralph bot daemon`. Use a file path via -c/--config."
+            );
+        }
+        Some(ConfigSource::Override { .. }) => unreachable!("Partitioned out overrides"),
+        None => Some(workspace_root.join("ralph.yml")),
+    };
     if let Some(ref path) = config_path
         && !path.exists()
     {
@@ -689,6 +720,7 @@ fn save_telegram_state(chat_id: i64) -> Result<()> {
     let state = serde_json::json!({
         "chat_id": chat_id,
         "last_seen": null,
+        "last_update_id": null,
         "pending_questions": {}
     });
 

@@ -4,6 +4,7 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicBool, Ordering};
 use std::time::{Duration, Instant};
 
+use chrono::Utc;
 use tracing::{debug, info, warn};
 
 use crate::bot::TelegramBot;
@@ -232,6 +233,12 @@ impl TelegramService {
         let handler = MessageHandler::new(handler_state_manager, &workspace_root);
         let mut offset: i32 = 0;
 
+        if let Ok(state) = state_manager.load_or_default()
+            && let Some(last_update_id) = state.last_update_id
+        {
+            offset = last_update_id + 1;
+        }
+
         // Register bot commands with Telegram API
         Self::register_commands(&bot).await;
 
@@ -326,6 +333,12 @@ impl TelegramService {
                                     "Failed to handle incoming Telegram message"
                                 );
                             }
+                        }
+
+                        state.last_seen = Some(Utc::now());
+                        state.last_update_id = Some(offset.saturating_sub(1));
+                        if let Err(e) = state_manager.save(&state) {
+                            warn!(error = %e, "Failed to persist Telegram state");
                         }
                     }
                 }

@@ -793,7 +793,9 @@ async fn main() -> Result<()> {
             hats::execute(&config_sources, args, cli.color.should_use_colors())
         }
         Some(Commands::Web(args)) => web::execute(args).await,
-        Some(Commands::Bot(args)) => bot::execute(args, cli.color.should_use_colors()).await,
+        Some(Commands::Bot(args)) => {
+            bot::execute(args, &config_sources, cli.color.should_use_colors()).await
+        }
         None => {
             // Default to run with TUI enabled (new default behavior)
             let args = RunArgs {
@@ -1916,6 +1918,20 @@ mod tests {
             }
             _ => panic!("Expected Override variant"),
         }
+    }
+
+    #[test]
+    fn test_bot_daemon_parses_global_config_flag() {
+        let cli = Cli::try_parse_from(["ralph", "bot", "daemon", "-c", "ralph.bot.yml"])
+            .expect("CLI parse failed");
+
+        assert!(cli.config.iter().any(|value| value == "ralph.bot.yml"));
+        assert!(matches!(
+            cli.command,
+            Some(Commands::Bot(crate::bot::BotArgs {
+                command: crate::bot::BotCommands::Daemon(_),
+            }))
+        ));
     }
 
     #[test]
