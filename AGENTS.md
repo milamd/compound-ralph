@@ -13,6 +13,8 @@ cargo test -p ralph-core test_name           # Run single test
 cargo test -p ralph-core smoke_runner        # Smoke tests (replay-based)
 cargo run -p ralph-e2e -- --mock             # E2E tests (CI-safe)
 ./scripts/setup-hooks.sh                     # Install pre-commit hooks (once)
+./scripts/release-local.sh                   # Build release + create macOS symlink
+./scripts/sync-with-upstream.sh               # Rebase against upstream repository
 ```
 
 **IMPORTANT**: Run `cargo test` before declaring any task done. Smoke test after code changes.
