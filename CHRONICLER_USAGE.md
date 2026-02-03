@@ -6,7 +6,7 @@ The Chronicler Hat implements "compounding" in the Ralph Orchestrator framework.
 
 ## Quick Start
 
-### 1. Using the Preset
+### Method 1: Use the Preset
 
 ```bash
 # Initialize with chronicler-enabled workflow
@@ -16,7 +16,7 @@ ralph init --preset with-chronicler
 ralph run --prompt "Add user authentication system"
 ```
 
-### 2. Adding to Existing Configuration
+### Method 2: Add to Existing Configuration
 
 Add the Chronicler hat to your existing `ralph.yml`:
 
@@ -34,6 +34,27 @@ hats:
       [Full instructions from chronicler.hat.md...]
 ```
 
+### Method 3: Use Built Binary
+
+```bash
+# Use the current ralph.yml (now includes Chronicler)
+/Users/dougmilam/GitHub/ralph-orchestrator/target/release/ralph run --prompt "Add user authentication"
+```
+
+This uses the confession workflow with Chronicler as the final step:
+- Builder → Confessor → Confession Handler → LOOP_COMPLETE → Chronicler
+
+## What Chronicler Does
+
+The Chronicler hat performs post-mortem analysis and memory compounding when missions complete successfully:
+
+1. **Triggers on Success**: Only activates on success events like `confession.clean`, `test.passed`, `review.approved`, and `LOOP_COMPLETE`
+2. **Analyzes Results**: Reviews git.diff, mission logs, and existing memories
+3. **Extracts Learnings**: Identifies patterns, decisions, fixes, and context
+4. **Compounds Memory**: Updates permanent memory using `ralph tools memory add`
+5. **Never Modifies Code**: Strictly analysis-only, no implementation changes
+6. **Ensures Continuous Improvement**: Through knowledge accumulation
+
 ## Success-Based Triggering
 
 Since Ralph doesn't have a built-in "missions with conditions" system, the Chronicler achieves success-only execution through strategic event triggering:
@@ -45,6 +66,7 @@ The Chronicler triggers on success events only:
 - **`test.passed`** - All tests are green, functionality verified
 - **`review.approved`** - Code quality checks passed  
 - **`LOOP_COMPLETE`** - Successful mission completion
+- **`confession.clean`** - Confession analysis passed
 - **`build.done`** - Successful compilation and basic checks
 
 ### What It Ignores
@@ -65,6 +87,11 @@ task.start → architect → plan.ready → builder → build.done → tester �
 #### Failed Mission Flow (No Chronicler)
 ```
 task.start → architect → plan.ready → builder → build.done → tester → test.failed → [back to builder]
+```
+
+#### Confession Workflow Flow
+```
+Builder → Confessor → Confession Handler → LOOP_COMPLETE → Chronicler
 ```
 
 ## Integration Patterns
@@ -189,6 +216,16 @@ The Chronicler categorizes insights into four memory types:
 - Use success events as gating mechanism
 - Emit completion events after memory updates
 
+## Verification
+
+```bash
+# List hats - you should see Chronicler
+ralph hats list
+
+# Validate configuration
+ralph hats validate
+```
+
 ## Troubleshooting
 
 ### Chronicler Never Activates
@@ -227,3 +264,5 @@ ralph run --config presets/with-chronicler.yml --prompt "Add password reset"
 ```
 
 The result is a completed feature AND compounded learnings for future sessions.
+
+The Chronicler ensures your project learns from every successful mission, building a knowledge base over time.
