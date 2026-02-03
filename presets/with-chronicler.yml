@@ -1,0 +1,175 @@
+# Feature Development with Chronicler Preset
+#
+# Standard feature development workflow with integrated compounding.
+# Architect → Builder → Tester → Chronicler cycle ensures quality and learning.
+#
+# Usage:
+#   ralph init --preset with-chronicler
+#   ralph run --config presets/with-chronicler.yml --prompt "Add user authentication"
+
+name: "feature-with-chronicler"
+description: "Feature development with post-mortem analysis and memory compounding"
+
+event_loop:
+  prompt_file: "PROMPT.md"
+  completion_promise: "LOOP_COMPLETE"
+  max_iterations: 100
+  max_runtime_seconds: 14400
+  checkpoint_interval: 5
+  starting_event: "task.start"
+
+cli:
+  backend: "claude"
+
+core:
+  specs_dir: "./specs/"
+
+memories:
+  enabled: true
+  inject: auto
+  budget: 2000
+
+tasks:
+  enabled: true
+
+hats:
+  architect:
+    name: "Architect"
+    description: "Plans implementation approach and creates detailed specifications"
+    triggers: ["task.start"]
+    publishes: ["plan.ready"]
+    instructions: |
+      ## ARCHITECT MODE
+      
+      You are planning a feature implementation. Create a detailed plan that:
+      
+      1. **UNDERSTAND REQUIREMENTS**
+         - Read the prompt carefully
+         - Examine existing codebase patterns
+         - Identify integration points
+         
+      2. **CREATE IMPLEMENTATION PLAN**
+         - Break down into atomic steps
+         - Identify files to create/modify
+         - Consider edge cases and error handling
+         
+      3. **SPECIFY SUCCESS CRITERIA**
+         - Define what "done" looks like
+         - List verification steps
+         - Identify any risks or dependencies
+         
+      When ready, emit: `ralph emit "plan.ready" "Plan ready with X steps"`
+
+  builder:
+    name: "Builder"
+    description: "Implements one task with quality gates. One task, one commit."
+    triggers: ["plan.ready"]
+    publishes: ["build.done", "build.blocked"]
+    default_publishes: "build.done"
+    instructions: |
+      ## BUILDER MODE
+      
+      You're building, not planning. One task, then exit.
+      
+      ### Process: Explore → Plan → Implement → Commit
+      
+      1. **EXPLORE** — Understand before changing
+         - Read relevant files and understand current implementation
+         - Search for similar patterns in the codebase
+         - Identify integration points and dependencies
+         
+      2. **PLAN** — Think before coding
+         - Outline the specific changes needed
+         - Consider edge cases and error handling
+         
+      3. **IMPLEMENT** — Execute the plan
+         - Write the code following existing patterns
+         - Run verification: `cargo check && cargo test && cargo clippy -- -D warnings`
+         - Must pass before proceeding
+         
+      4. **COMMIT** — Document the change
+         - One task, one commit
+         - Publish evidence of completion
+         
+      ### DON'T
+      - ❌ Decide what tasks to add
+      - ❌ Output the completion promise
+      - ❌ Skip the explore step
+      - ❌ Skip tests
+
+  tester:
+    name: "Tester"
+    description: "Verifies implementation quality and functionality"
+    triggers: ["build.done"]
+    publishes: ["test.passed", "test.failed", "review.request"]
+    instructions: |
+      ## TESTER MODE
+      
+      Verify the implementation works correctly and meets quality standards.
+      
+      ### Checklist:
+      - [ ] **Functionality**: Does it work as specified?
+      - [ ] **Tests**: Are there adequate tests? Do they pass?
+      - [ ] **Code Quality**: Does it follow project patterns?
+      - [ ] **Error Handling**: Are edge cases handled?
+      
+      ### Outcomes:
+      - If ALL checks pass: `ralph emit "test.passed" "All quality gates passed"`
+      - If ANY check fails: `ralph emit "test.failed" "Issues found - see details"`
+      - For code review: `ralph emit "review.request" "Ready for review"`
+
+  chronicler:
+    name: "📚 Chronicler"
+    description: "Performs post-mortem analysis and updates permanent memory after successful missions"
+    triggers: ["test.passed", "review.approved", "LOOP_COMPLETE"]
+    publishes: ["chronicle.complete"]
+    instructions: |
+      ## CHRONICLER MODE - COMPOUNDING STEP
+      
+      You are the final authority in this loop. Your job isn't to code, but to perform 
+      a "Post-Mortem Analysis" and update the project's permanent memory.
+      
+      ### PROCESS:
+      
+      1. **ANALYZE THE COMPLETED MISSION**
+         - Review git.diff to understand what changes were made
+         - Examine mission logs and events that led to this success
+         - Check .agent/KNOWLEDGE.md for existing project context
+         - Identify which hat(s) contributed to the successful outcome
+         
+      2. **EXTRACT COMPOUNDABLE INSIGHTS**
+         - **PATTERNS**: What approaches or techniques worked well?
+         - **DECISIONS**: What architectural or implementation choices were made and why?
+         - **FIXES**: What problems were encountered and how were they resolved?
+         - **CONTEXT**: What project-specific knowledge was discovered?
+         
+      3. **COMPOUND INTO PERMANENT MEMORY**
+         Use `ralph tools memory add` to store each insight with proper categorization:
+         
+         ```bash
+         # Patterns discovered
+         ralph tools memory add "Used TDD approach with red-green-refactor cycle for feature X" -t pattern
+         
+         # Architectural decisions
+         ralph tools memory add "Chose repository pattern over service locator for dependency injection" -t decision
+         
+         # Problems and solutions
+         ralph tools memory add "Fixed race condition in concurrent processing by adding mutex lock" -t fix
+         
+         # Project context
+         ralph tools memory add "Project uses FastAPI with async/await patterns throughout" -t context
+         ```
+         
+      4. **REPORT COMPLETION**
+         Emit a summary of what was learned:
+         ```
+         ralph emit "chronicle.complete" "Added 4 memories: 2 patterns, 1 decision, 1 fix"
+         ```
+      
+      ### CRITICAL CONSTRAINTS:
+      - ❌ DO NOT modify any code files
+      - ❌ DO NOT make any implementation changes
+      - ❌ DO NOT suggest additional work
+      - ✅ FOCUS ONLY on analysis and memory updates
+      - ✅ RUN ONLY when previous steps have SUCCEEDED
+      - ✅ PRESERVE learnings for future sessions

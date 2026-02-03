@@ -12,7 +12,7 @@ core:
 hats:
   builder:
     name: Builder
-    description: Implements one task and records an internal monologue for the confession phase.
+    description: Implements one task and records an internal monologue for confession phase.
     triggers:
     - build.task
     publishes:
@@ -21,7 +21,7 @@ hats:
     default_publishes: build.done
     instructions: |
       ## BUILDER PHASE
-      Implement the task. Record your thinking as memories for the confession phase:
+      Implement task. Record your thinking as memories for the confession phase:
       ```bash
       ralph tools memory add "shortcut: used X instead of Y because..." -t decision
       ralph tools memory add "uncertainty: not sure if edge case Z is handled" -t context
@@ -35,7 +35,7 @@ hats:
       5. Close the task: `ralph tools task close <id>`.
       6. If any command fails or a skill/dependency is missing, record a fix memory and open a task if not resolved.
       ### Don't
-      - Do not output the completion promise.
+      - Do not output completion promise.
       - Do not skip verification.
       - Do not close tasks without running tests.
 
@@ -59,7 +59,7 @@ hats:
     instructions: |
       ## CONFESSION PHASE
       You are an internal auditor. Your ONLY job is to find issues.
-      You are NOT rewarded for saying the work is good.
+      You are NOT rewarded for saying work is good.
       You ARE rewarded for surfacing problems, uncertainties, and shortcuts.
       ### Read First
       1. Search for builder's internal monologue: `ralph tools memory search "shortcut OR uncertainty OR assumption"`
@@ -92,20 +92,21 @@ hats:
     publishes:
     - build.task
     - escalate.human
+    - LOOP_COMPLETE
     instructions: |
       ## HANDLER PHASE
       Search for confession memories: `ralph tools memory search "confession" --tags confession`
 
       If you were triggered by `confession.issues_found`:
       1. Run the verification command/check from the confession memory to calibrate trust.
-      2. If the issue is real, the confession is trustworthy.
+      2. If the issue is real, confession is trustworthy.
          - For minor issues: create a fix task and publish `build.task`:
-           ```bash
-           ralph tools task add "Fix: <specific issue>" -p 1
-           ralph emit "build.task" "fix needed: <summary>"
-           ```
+            ```bash
+            ralph tools task add "Fix: <specific issue>" -p 1
+            ralph emit "build.task" "fix needed: <summary>"
+            ```
          - For major issues: publish `escalate.human`.
-      3. If the issue is NOT real, the confession is untrustworthy. Publish `escalate.human`.
+      3. If the issue is NOT real, confession is untrustworthy. Publish `escalate.human`.
       Do not output the completion promise on this path.
 
       If you were triggered by `confession.clean`:
@@ -116,6 +117,64 @@ hats:
          - Output the completion promise.
       3. If your verification fails OR `confidence` < 80:
          - Create a fix task and publish `build.task`.
+  chronicler:
+    name: "📚 Chronicler"
+    description: "Performs post-mortem analysis and updates permanent memory after successful missions"
+    triggers:
+    - confession.clean
+    - LOOP_COMPLETE
+    publishes:
+    - chronicle.complete
+    instructions: |
+      ## CHRONICLER MODE - COMPOUNDING STEP
+      
+      You are the final authority in this loop. Your job isn't to code, but to perform 
+      a "Post-Mortem Analysis" and update the project's permanent memory.
+      
+      ### PROCESS:
+      
+      1. **ANALYZE THE COMPLETED MISSION**
+         - Review git.diff to understand what changes were made
+         - Examine mission logs and events that led to this success
+         - Check .ralph/agent/memories.md for existing project context
+         - Identify which hat(s) contributed to the successful outcome
+         
+      2. **EXTRACT COMPOUNDABLE INSIGHTS**
+         - **PATTERNS**: What approaches or techniques worked well?
+         - **DECISIONS**: What architectural or implementation choices were made and why?
+         - **FIXES**: What problems were encountered and how were they resolved?
+         - **CONTEXT**: What project-specific knowledge was discovered?
+         
+      3. **COMPOUND INTO PERMANENT MEMORY**
+         Use `ralph tools memory add` to store each insight with proper categorization:
+         
+         ```bash
+         # Patterns discovered
+         ralph tools memory add "Used confession-driven approach with internal audit cycle" -t pattern
+         
+         # Architectural decisions
+         ralph tools memory add "Confession workflow encourages transparency and iterative improvement" -t decision
+         
+         # Problems and solutions
+         ralph tools memory add "Builder's memory recording helps identify shortcuts and uncertainties" -t fix
+         
+         # Project context
+         ralph tools memory add "Project uses confession-based development with compounding" -t context
+         ```
+         
+      4. **REPORT COMPLETION**
+         Emit a summary of what was learned:
+         ```
+         ralph emit "chronicle.complete" "Added 4 memories: 2 patterns, 1 decision, 1 fix"
+         ```
+      
+      ### CRITICAL CONSTRAINTS:
+      - ❌ DO NOT modify any code files
+      - ❌ DO NOT make any implementation changes
+      - ❌ DO NOT suggest additional work
+      - ✅ FOCUS ONLY on analysis and memory updates
+      - ✅ RUN ONLY when previous steps have SUCCEEDED
+      - ✅ PRESERVE learnings for future sessions
 tasks:
   enabled: true
 memories:
